@@ -176,7 +176,7 @@ class TestFlightTrackerSearchApi(unittest.TestCase):
         self.assertEqual(res[0]["price_with_bag_usd"], 250)
         self.assertEqual(res[0]["baggage_fee"], 50)
 
-        # 3. Flight not found in records_with_bag (should not be in result)
+        # 3. Flight not found in records_with_bag (unmatched flight should be included with None values)
         records = [{
             "flight_number": "IZ418",
             "departure_time": "23:00",
@@ -186,7 +186,40 @@ class TestFlightTrackerSearchApi(unittest.TestCase):
         }]
         records_with_bag = []
         res = process_baggage_comparisons(records, records_with_bag)
-        self.assertEqual(len(res), 0)
+        self.assertEqual(len(res), 1)
+        self.assertIsNone(res[0]["price_with_bag_usd"])
+        self.assertIsNone(res[0]["checked_bag_included"])
+        self.assertIsNone(res[0]["baggage_fee"])
+
+        # 4. Time normalization (17:30:00 vs 17:30)
+        records = [{
+            "flight_number": "TK100",
+            "departure_time": "17:30:00",
+            "price_usd": 200,
+        }]
+        records_with_bag = [{
+            "flight_number": "TK100",
+            "departure_time": "17:30",
+            "price_usd": 250,
+        }]
+        res = process_baggage_comparisons(records, records_with_bag)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["baggage_fee"], 50)
+
+        # 5. Fallback matching (flight number matches, but time is completely different)
+        records = [{
+            "flight_number": "TK200",
+            "departure_time": "10:00",
+            "price_usd": 150,
+        }]
+        records_with_bag = [{
+            "flight_number": "TK200",
+            "departure_time": "11:00",  # Different time, wouldn't match normally
+            "price_usd": 210,
+        }]
+        res = process_baggage_comparisons(records, records_with_bag)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["baggage_fee"], 60)
 
 
 if __name__ == '__main__':

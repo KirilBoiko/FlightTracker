@@ -235,23 +235,38 @@ def process_baggage_comparisons(records: list, records_with_bag: list) -> list:
     # 1 & 2. Loop through the results of the first API call (checked_bags = 0)
     for flight in records:
         flight_number = flight.get("flight_number")
-        departure_time = flight.get("departure_time")
-        match_key = f"{flight_number}_{departure_time}"
+        departure_time_norm = str(flight.get("departure_time", ""))[:5]
+        match_key = f"{flight_number}_{departure_time_norm}"
         
         flight["base_price"] = flight.get("price_usd")
         parsed_flights[match_key] = flight
 
     final_records = []
+    matched_keys = set()
     
     # 3. Loop through the results of the second API call (checked_bags = 1)
     for flight in records_with_bag:
         flight_number = flight.get("flight_number")
-        departure_time = flight.get("departure_time")
-        match_key = f"{flight_number}_{departure_time}"
+        departure_time_norm = str(flight.get("departure_time", ""))[:5]
+        match_key = f"{flight_number}_{departure_time_norm}"
+        
+        matched_flight = None
+        used_key = None
         
         if match_key in parsed_flights:
-            total_with_bag_price = flight.get("price_usd")
             matched_flight = parsed_flights[match_key]
+            used_key = match_key
+        else:
+            # Fallback: try matching on flight number alone
+            for k, v in parsed_flights.items():
+                if k.startswith(f"{flight_number}_") and k not in matched_keys:
+                    matched_flight = v
+                    used_key = k
+                    break
+                    
+        if matched_flight:
+            matched_keys.add(used_key)
+            total_with_bag_price = flight.get("price_usd")
             base_price = matched_flight["base_price"]
             
             # Calculate the fee
@@ -272,6 +287,17 @@ def process_baggage_comparisons(records: list, records_with_bag: list) -> list:
                 matched_flight["checked_bag_included"] = None
                 
             final_records.append(matched_flight)
+
+    # Process unmatched base flights
+    for key, flight in parsed_flights.items():
+        if key not in matched_keys:
+            flight_number = flight.get("flight_number")
+            departure_time = flight.get("departure_time")
+            logger.warning(f"Unmatched flight: {flight_number} at {departure_time} found in base search but missing in with-bag search.")
+            flight["price_with_bag_usd"] = None
+            flight["checked_bag_included"] = None
+            flight["baggage_fee"] = None
+            final_records.append(flight)
             
     return final_records
 
