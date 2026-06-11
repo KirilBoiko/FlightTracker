@@ -1,5 +1,20 @@
+# Data outputs
 *.csv
 *.json
-scratch/
+*.xlsx
+*.xls
+
+# macOS
+.DS_Store
+~$*
+
+# Runtime artifacts
 __pycache__/
 *.pyc
+*.pyo
+logs/
+api_responses/
+scratch/
+
+# Env / secrets
+.env
