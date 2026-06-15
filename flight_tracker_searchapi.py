@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Flight Price Tracker from Tbilisi (TBS) to Target Destinations (SearchApi.io version)
-===================================================================================
-This script tracks flight prices from Tbilisi (TBS) to a list of target
-destinations using the SearchApi.io Google Flights API. It collects the top 5
-cheapest flights and appends them to a historical CSV dataset.
+Flight Price Tracker — TBS/TLV/BUS Multi-Route (SearchApi.io version)
+=====================================================================
+This script tracks flight prices across four routes:
+  TBS → TLV, TBS → BUS, TLV → TBS, BUS → TBS
+for every departure date in July 2026. It collects the top 5 cheapest
+flights per route/date and appends them to a historical CSV dataset.
 
 Installation:
     pip install pandas requests
@@ -27,6 +28,7 @@ Execution:
 
 import os
 import sys
+import json
 import time
 import datetime
 import logging
@@ -44,12 +46,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-ORIGIN = "TBS"
-DESTINATIONS = ['IST']
+ROUTES = [
+    ("TBS", "TLV"),
+    ("BUS", "TLV"),
+    ("TLV", "TBS"),
+    ("TLV", "BUS"),
+]
 SEARCHAPI_URL = "https://www.searchapi.io/api/v1/search"
-CSV_FILE_NAME = "tbs_pricing_data.csv"
+CSV_FILE_NAME = "july_2026_pricing_data.csv"
 SLEEP_DELAY_SECONDS = 2.0
-COMPARE_BAGGAGE_PRICES = True  # Compare base fare vs fare with checked bag to check if bag is included
 
 
 def get_api_key() -> str:
@@ -78,11 +83,11 @@ def parse_price(price_val, fallback="N/A"):
         return fallback
     if isinstance(price_val, (int, float)):
         return int(price_val)
-    
+
     price_str = str(price_val).strip()
     if not price_str:
         return fallback
-    
+
     # Strip any currency symbols, commas, or spaces
     cleaned = "".join([c for c in price_str if c.isdigit()])
     try:
@@ -92,43 +97,62 @@ def parse_price(price_val, fallback="N/A"):
         return fallback
 
 
-def fetch_flights(origin: str, destination: str, departure_date: str, api_key: str, checked_bags: int = 0) -> list:
+def normalize_aircraft(name: str) -> str:
+    """
+    Converts verbose aircraft names to short codes.
+    Examples: 'Boeing 737' → 'B737', 'Airbus A321neo' → 'A321n', 'Airbus A320' → 'A320'.
+    """
+    if not name:
+        return name
+    s = name.strip()
+    if s.lower().startswith("boeing "):
+        short = s[7:].strip()
+        short = short.replace(" MAX", "M").replace(" Max", "M").replace(" ", "")
+        return "B" + short
+    if s.lower().startswith("airbus "):
+        short = s[7:].strip()
+        short = short.replace("neo", "n").replace("Neo", "n").replace("ceo", "").replace("CEO", "")
+        return short.replace(" ", "")
+    return s.replace(" ", "")
+
+
+def fetch_flights(origin: str, destination: str, departure_date: str, api_key: str) -> list:
     """
     Queries the SearchApi.io Google Flights API for a specific route and departure date.
-    Extracts, cleans, and returns the top 5 cheapest flights.
+    Returns the base price for each flight, sorted cheapest first.
     """
-    # Define query parameters for SearchApi Google Flights
     params = {
         "engine": "google_flights",
         "departure_id": origin,
         "arrival_id": destination,
         "outbound_date": departure_date,
-        "flight_type": "one_way",  # Specifies 'one-way' flight search for SearchApi
-        "stops": "nonstop",        # Exclusively return direct flights for SearchApi
-        "currency": "USD",         # Ensures prices are returned in USD
-        "hl": "en",                # English language localization
-        "gl": "us",                # US geolocation context
+        "flight_type": "one_way",  # one-way search
+        "stops": "nonstop",        # direct flights only
+        "currency": "USD",
+        "hl": "en",
+        "gl": "us",
         "api_key": api_key
     }
-    if checked_bags > 0:
-        params["checked_bags"] = checked_bags
 
     logger.info(f"Fetching {origin} to {destination} for {departure_date}...")
 
     try:
         response = requests.get(SEARCHAPI_URL, params=params, timeout=30)
-        # Check for HTTP errors (e.g., 401 Unauthorized, 403 Forbidden, 500 Server Error)
         response.raise_for_status()
         results = response.json()
-        
-        # Debug: Save last response to a file so we can inspect the exact baggage fields
+
+        # Save raw API response to a timestamped file so every run is preserved
         try:
-            import json
-            filename = f"searchapi_response_{destination}_bags_{checked_bags}.json"
-            with open(filename, "w") as f:
+            raw_dir = os.path.join("api_responses", "raw")
+            os.makedirs(raw_dir, exist_ok=True)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            raw_file = os.path.join(raw_dir, f"{ts}_{origin}_{destination}_dep{departure_date}.json")
+            with open(raw_file, "w") as f:
                 json.dump(results, f, indent=2)
-        except Exception:
-            pass
+            logger.info(f"Raw API response saved → {raw_file}")
+        except Exception as e:
+            logger.warning(f"Could not save raw API response: {e}")
+
     except requests.exceptions.Timeout:
         logger.error(f"Timeout occurred while fetching flight data for {destination} on {departure_date}.")
         return []
@@ -136,15 +160,12 @@ def fetch_flights(origin: str, destination: str, departure_date: str, api_key: s
         logger.error(f"HTTP Request error for {destination} on {departure_date}: {e}")
         return []
 
-    # Check for SearchApi error in the returned JSON
     if "error" in results:
         logger.error(f"SearchApi returned an error: {results.get('error')}")
         return []
 
     snapshot_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    flights_records = []
 
-    # SearchApi Google Flights splits results into 'best_flights' and 'other_flights'
     best_flights = results.get("best_flights", [])
     other_flights = results.get("other_flights", [])
     all_flights_raw = best_flights + other_flights
@@ -153,153 +174,77 @@ def fetch_flights(origin: str, destination: str, departure_date: str, api_key: s
         logger.warning(f"No flights returned in response for {destination} on {departure_date}.")
         return []
 
-    for flight in all_flights_raw:
-        segments = flight.get("flights", [])
+    # Days remaining until departure (useful for price trend analysis)
+    try:
+        dep_date_obj = datetime.date.fromisoformat(departure_date)
+        days_till_departure = (dep_date_obj - datetime.date.today()).days
+    except ValueError:
+        days_till_departure = None
+
+    # Deduplicate by flight number + departure time, keeping cheapest price
+    flights_by_key = {}
+
+    for fare in all_flights_raw:
+        segments = fare.get("flights", [])
         if not segments:
             continue
 
-        # Extract carrier names of all legs, remove duplicates preserving order
-        airlines = [seg.get("airline") for seg in segments if seg.get("airline")]
-        unique_airlines = list(dict.fromkeys(airlines))
-        airline_name = ", ".join(unique_airlines) if unique_airlines else "Unknown Carrier"
-
-        # Extract unique aircraft models preserving order
-        airplanes = [seg.get("airplane") for seg in segments if seg.get("airplane")]
-        unique_airplanes = list(dict.fromkeys(airplanes))
-        airplane_name = ", ".join(unique_airplanes) if unique_airplanes else "Unknown Aircraft"
-
-        # Extract unique flight numbers preserving order
         flight_numbers = [seg.get("flight_number") for seg in segments if seg.get("flight_number")]
         unique_flight_numbers = list(dict.fromkeys(flight_numbers))
         flight_no = ", ".join(unique_flight_numbers) if unique_flight_numbers else "Unknown Flight"
 
-        # Extract scheduled departure time of the first leg
+        airlines = [seg.get("airline") for seg in segments if seg.get("airline")]
+        unique_airlines = list(dict.fromkeys(airlines))
+        airline_name = ", ".join(unique_airlines) if unique_airlines else "Unknown Carrier"
+
         dep_time = segments[0].get("departure_airport", {}).get("time")
+        dep_time_norm = str(dep_time)[:5] if dep_time else "UnknownTime"
 
-        raw_price = flight.get("price")
-        price_usd = parse_price(raw_price, fallback="N/A")
+        # Match key now includes airline to prevent "Unknown Flight" from collapsing distinct flights
+        match_key = f"{airline_name}_{flight_no}_{dep_time_norm}"
+        
+        if match_key in flights_by_key:
+            # Keep the cheapest price seen for this exact flight
+            existing_price = flights_by_key[match_key]["price_usd"]
+            new_price = parse_price(fare.get("price"), fallback="N/A")
+            if existing_price == "N/A" or (new_price != "N/A" and new_price < existing_price):
+                flights_by_key[match_key]["price_usd"] = new_price
+            continue
 
-        duration = flight.get("total_duration")
+        airplanes = [normalize_aircraft(seg.get("airplane", "")) for seg in segments if seg.get("airplane")]
+        unique_airplanes = list(dict.fromkeys(airplanes))
+        airplane_name = ", ".join(unique_airplanes) if unique_airplanes else "Unknown Aircraft"
+
+        duration = fare.get("total_duration")
         if duration is None:
-            # Fallback: sum duration of all segments
             duration = sum(seg.get("duration", 0) for seg in segments)
 
-        # Check if checked bag is included
-        extensions = flight.get("extensions", [])
-        checked_bag_included = None
-        for ext in extensions:
-            ext_lower = ext.lower()
-            if "checked bag" in ext_lower or "checked baggage" in ext_lower:
-                if "free" in ext_lower or "included" in ext_lower:
-                    checked_bag_included = True
-                    break
-                elif "fee" in ext_lower or "not included" in ext_lower or "no " in ext_lower:
-                    checked_bag_included = False
-                    break
+        # Keep only HH:MM from the departure time
+        dep_time_display = str(dep_time)[:5] if dep_time else None
 
-        flights_records.append({
+        price_usd = parse_price(fare.get("price"), fallback="N/A")
+
+        flights_by_key[match_key] = {
             "snapshot_date": snapshot_date,
             "departure_date": departure_date,
+            "days_till_departure": days_till_departure,
             "destination": destination,
             "airline": airline_name,
             "flight_number": flight_no,
-            "departure_time": dep_time,
+            "departure_time": dep_time_display,
             "aircraft": airplane_name,
             "price_usd": price_usd,
-            "price_with_bag_usd": None,  # Will be populated in main if compared
             "duration_minutes": int(duration) if duration is not None else None,
             "is_direct": True,
-            "checked_bag_included": checked_bag_included
-        })
+        }
 
-    # Sort flights by price ascending, placing 'N/A' or 0 fallbacks at the end
-    def get_sort_key(x):
-        val = x["price_usd"]
-        if val == "N/A" or val == 0:
-            return float('inf')
-        return float(val)
+    flights_records = list(flights_by_key.values())
 
-    flights_records.sort(key=get_sort_key)
+    # Sort cheapest first, N/A prices go to the end
+    flights_records.sort(key=lambda x: float(x["price_usd"]) if x["price_usd"] != "N/A" else float("inf"))
 
     logger.info(f"Successfully processed {len(flights_records)} flight options.")
     return flights_records
-
-
-def process_baggage_comparisons(records: list, records_with_bag: list) -> list:
-    """
-    Compares flights without bags and flights with bags.
-    Determines if checked baggage is included, and sets the price with bag.
-    """
-    parsed_flights = {}
-    
-    # 1 & 2. Loop through the results of the first API call (checked_bags = 0)
-    for flight in records:
-        flight_number = flight.get("flight_number")
-        departure_time_norm = str(flight.get("departure_time", ""))[:5]
-        match_key = f"{flight_number}_{departure_time_norm}"
-        
-        flight["base_price"] = flight.get("price_usd")
-        parsed_flights[match_key] = flight
-
-    final_records = []
-    matched_keys = set()
-    
-    # 3. Loop through the results of the second API call (checked_bags = 1)
-    for flight in records_with_bag:
-        flight_number = flight.get("flight_number")
-        departure_time_norm = str(flight.get("departure_time", ""))[:5]
-        match_key = f"{flight_number}_{departure_time_norm}"
-        
-        matched_flight = None
-        used_key = None
-        
-        if match_key in parsed_flights:
-            matched_flight = parsed_flights[match_key]
-            used_key = match_key
-        else:
-            # Fallback: try matching on flight number alone
-            for k, v in parsed_flights.items():
-                if k.startswith(f"{flight_number}_") and k not in matched_keys:
-                    matched_flight = v
-                    used_key = k
-                    break
-                    
-        if matched_flight:
-            matched_keys.add(used_key)
-            total_with_bag_price = flight.get("price_usd")
-            base_price = matched_flight["base_price"]
-            
-            # Calculate the fee
-            if isinstance(total_with_bag_price, int) and isinstance(base_price, int):
-                baggage_fee = total_with_bag_price - base_price
-            else:
-                baggage_fee = "N/A"
-            
-            # Append combined metrics
-            matched_flight["price_with_bag_usd"] = total_with_bag_price
-            matched_flight["baggage_fee"] = baggage_fee
-            
-            if baggage_fee == 0:
-                matched_flight["checked_bag_included"] = True
-            elif baggage_fee != "N/A" and baggage_fee > 0:
-                matched_flight["checked_bag_included"] = False
-            elif baggage_fee == "N/A":
-                matched_flight["checked_bag_included"] = None
-                
-            final_records.append(matched_flight)
-
-    # Process unmatched base flights
-    for key, flight in parsed_flights.items():
-        if key not in matched_keys:
-            flight_number = flight.get("flight_number")
-            departure_time = flight.get("departure_time")
-            logger.warning(f"Unmatched flight: {flight_number} at {departure_time} found in base search but missing in with-bag search.")
-            flight["price_with_bag_usd"] = None
-            flight["checked_bag_included"] = None
-            flight["baggage_fee"] = None
-            final_records.append(flight)
-            
-    return final_records
 
 
 def append_to_csv(records: list, file_name: str) -> None:
@@ -311,26 +256,23 @@ def append_to_csv(records: list, file_name: str) -> None:
         return
 
     df = pd.DataFrame(records)
-    
-    # Ensure correct columns order
+
     columns_order = [
         "snapshot_date",
         "departure_date",
+        "days_till_departure",
         "destination",
         "airline",
         "flight_number",
         "departure_time",
         "aircraft",
         "price_usd",
-        "price_with_bag_usd",
         "duration_minutes",
         "is_direct",
-        "checked_bag_included"
     ]
     df = df[columns_order]
 
     try:
-        # Append to CSV. If file exists, do not write the header.
         df.to_csv(file_name, mode='a', index=False, header=not os.path.exists(file_name))
         logger.info(f"Successfully saved {len(records)} records to '{file_name}'.")
     except Exception as e:
@@ -338,58 +280,66 @@ def append_to_csv(records: list, file_name: str) -> None:
 
 
 def main():
-    logger.info("Initializing TBS Route Intelligence Tracker (SearchApi version)...")
-    
-    # 1. Secure API Key validation
+    logger.info("Initializing Multi-Route Flight Price Tracker (SearchApi version)...")
+
     api_key = get_api_key()
 
-    # Target dates: last full week of June 2026 and last full week of July 2026 (August dates removed for now)
-    today = datetime.date.today()
+    # All departure dates in July 2026
+    july_start = datetime.date(2026, 7, 1)
     target_dates = [
-        '2026-07-19'
+        (july_start + datetime.timedelta(days=i)).isoformat()
+        for i in range(31)
     ]
-    
-    logger.info(f"System date: {today}")
-    logger.info(f"Calculated departure dates: {target_dates}")
-    logger.info(f"Target destinations: {DESTINATIONS}")
+
+    logger.info(f"System date: {datetime.date.today()}")
+    logger.info(f"Departure dates: {target_dates[0]} → {target_dates[-1]} ({len(target_dates)} days)")
+    logger.info(f"Routes: {[f'{o}→{d}' for o, d in ROUTES]}")
+
+    # Always start fresh — delete any existing CSV for this run
+    if os.path.exists(CSV_FILE_NAME):
+        os.remove(CSV_FILE_NAME)
+        logger.info(f"Removed existing '{CSV_FILE_NAME}' — creating fresh file.")
 
     all_scraped_records = []
     success_count = 0
     failure_count = 0
 
-    # 3. Main execution loop
-    for dest in DESTINATIONS:
+    for origin, dest in ROUTES:
+        logger.info(f"--- Route: {origin} → {dest} ---")
         for dep_date in target_dates:
             try:
-                # Fetch base flights (0 checked bags)
-                records = fetch_flights(ORIGIN, dest, dep_date, api_key, checked_bags=0)
+                records = fetch_flights(origin, dest, dep_date, api_key)
+
                 if records:
-                    if COMPARE_BAGGAGE_PRICES:
-                        logger.info("Comparing prices with 1 checked bag to detect if bag is included...")
-                        time.sleep(SLEEP_DELAY_SECONDS)
-                        # Fetch flights with 1 checked bag
-                        records_with_bag = fetch_flights(ORIGIN, dest, dep_date, api_key, checked_bags=1)
-                        records = process_baggage_comparisons(records, records_with_bag)
-                                
-                    # Keep only the top 5 cheapest flights (records is already sorted)
-                    all_scraped_records.extend(records[:5])
+                    top5 = records[:5]
+                    all_scraped_records.extend(top5)
                     success_count += 1
+
+                    # Save processed records to a timestamped JSON file
+                    try:
+                        proc_dir = os.path.join("api_responses", "processed")
+                        os.makedirs(proc_dir, exist_ok=True)
+                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        proc_file = os.path.join(proc_dir, f"{ts}_{origin}_{dest}_dep{dep_date}.json")
+                        with open(proc_file, "w") as f:
+                            json.dump(records, f, indent=2, default=str)
+                        logger.info(f"Processed records saved  → {proc_file}")
+                    except Exception as e:
+                        logger.warning(f"Could not save processed records: {e}")
                 else:
                     failure_count += 1
+
             except Exception as e:
-                logger.error(f"Unexpected error tracking {ORIGIN} to {dest} on {dep_date}: {e}")
+                logger.error(f"Unexpected error tracking {origin} to {dest} on {dep_date}: {e}")
                 failure_count += 1
 
-            # Polite sleep to respect API rate limits and avoid throttling
             time.sleep(SLEEP_DELAY_SECONDS)
 
-    # 4. Save parsed results to CSV in a single high-integrity operation
     if all_scraped_records:
         append_to_csv(all_scraped_records, CSV_FILE_NAME)
     else:
         logger.warning("No records were successfully collected during this run.")
 
-    # 5. Output concise execution summary
     logger.info("=========================================")
     logger.info("Flight tracking run complete.")
     logger.info(f"Successful queries: {success_count}")

@@ -6,7 +6,7 @@ import pandas as pd
 import datetime
 
 # Import the SearchApi script functions to test
-from flight_tracker_searchapi import fetch_flights, append_to_csv, process_baggage_comparisons
+from flight_tracker_searchapi import fetch_flights, append_to_csv
 
 class TestFlightTrackerSearchApi(unittest.TestCase):
 
@@ -26,9 +26,21 @@ class TestFlightTrackerSearchApi(unittest.TestCase):
                             "departure_airport": {"time": "2026-07-30 08:30"}
                         }
                     ],
+                    "price": 200,
+                    "total_duration": 255,
+                    "extensions": ["Checked bag for a fee"]
+                },
+                {
+                    "flights": [
+                        {
+                            "airline": "Lufthansa",
+                            "flight_number": "LH123",
+                            "airplane": "Boeing 737",
+                            "departure_airport": {"time": "2026-07-30 08:30"}
+                        }
+                    ],
                     "price": 245,
                     "total_duration": 255,
-                    # Checked bag is free
                     "extensions": ["1 free checked bag", "Wi-Fi"]
                 },
                 {
@@ -42,7 +54,6 @@ class TestFlightTrackerSearchApi(unittest.TestCase):
                     ],
                     "price": 150,
                     "total_duration": 180,
-                    # Checked bag for a fee
                     "extensions": ["Checked bag for a fee"]
                 }
             ],
@@ -58,8 +69,7 @@ class TestFlightTrackerSearchApi(unittest.TestCase):
                     ],
                     "price": 180,
                     "total_duration": 220,
-                    # No baggage information in extensions
-                    "extensions": ["Standard legroom"]
+                    "extensions": ["1 free checked bag"]
                 }
             ]
         }
@@ -74,35 +84,28 @@ class TestFlightTrackerSearchApi(unittest.TestCase):
         params = called_kwargs.get("params", {})
         self.assertEqual(params.get("stops"), "nonstop")
         self.assertEqual(params.get("flight_type"), "one_way")
-        self.assertNotIn("checked_bags", params)
-
-        # Execute fetch_flights with checked_bags=1
-        mock_get.reset_mock()
-        _ = fetch_flights("TBS", "TLV", "2026-07-30", "dummy_key", checked_bags=1)
-        mock_get.assert_called_once()
-        called_args, called_kwargs = mock_get.call_args
-        params = called_kwargs.get("params", {})
-        self.assertEqual(params.get("checked_bags"), 1)
 
         # Verify correct parsing of checked_bag_included
         self.assertEqual(len(records), 3)
         
-        # Verify that price_with_bag_usd is initialized to None in fetch_flights
-        for r in records:
-            self.assertIn("price_with_bag_usd", r)
-            self.assertIsNone(r["price_with_bag_usd"])
-        
-        # 1. Air Georgia (Cheapest: 150) -> Checked bag for a fee (False)
+        # 1. Air Georgia (150, only fee bag option) -> price_usd=150, price_with_bag=None
         self.assertEqual(records[0]["airline"], "Air Georgia")
+        self.assertEqual(records[0]["price_usd"], 150)
+        self.assertIsNone(records[0]["price_with_bag_usd"])
         self.assertFalse(records[0]["checked_bag_included"])
         
-        # 2. Pegasus (Middle: 180) -> No baggage extension (None)
+        # 2. Pegasus (180, only free bag option) -> price_usd=180, price_with_bag=180
         self.assertEqual(records[1]["airline"], "Pegasus")
-        self.assertIsNone(records[1]["checked_bag_included"])
+        self.assertEqual(records[1]["price_usd"], 180)
+        self.assertEqual(records[1]["price_with_bag_usd"], 180)
+        self.assertTrue(records[1]["checked_bag_included"])
         
-        # 3. Lufthansa (Most expensive: 245) -> Free checked bag (True)
+        # 3. Lufthansa (200 base, 245 with bag) -> price_usd=200, price_with_bag=245
         self.assertEqual(records[2]["airline"], "Lufthansa")
-        self.assertTrue(records[2]["checked_bag_included"])
+        self.assertEqual(records[2]["price_usd"], 200)
+        self.assertEqual(records[2]["price_with_bag_usd"], 245)
+        self.assertFalse(records[2]["checked_bag_included"])
+        self.assertEqual(records[2]["baggage_fee"], 45)
 
     def test_append_to_csv_writes_new_columns(self):
         # Create a temporary directory to test CSV writing
@@ -135,92 +138,7 @@ class TestFlightTrackerSearchApi(unittest.TestCase):
             self.assertEqual(df.iloc[0]["price_with_bag_usd"], 250)
             self.assertTrue(df.iloc[0]["checked_bag_included"])
 
-    def test_process_baggage_comparisons(self):
-        # 1. Flight with identical price (fee = 0)
-        records = [{
-            "flight_number": "LY5118",
-            "departure_time": "01:40",
-            "price_usd": 354,
-            "airline": "El Al",
-            "checked_bag_included": None
-        }]
-        records_with_bag = [{
-            "flight_number": "LY5118",
-            "departure_time": "01:40",
-            "price_usd": 354,
-            "airline": "El Al"
-        }]
-        res = process_baggage_comparisons(records, records_with_bag)
-        self.assertEqual(len(res), 1)
-        self.assertTrue(res[0]["checked_bag_included"])
-        self.assertEqual(res[0]["price_with_bag_usd"], 354)
-        self.assertEqual(res[0]["baggage_fee"], 0)
-
-        # 2. Flight with price difference (fee > 0)
-        records = [{
-            "flight_number": "LH123",
-            "departure_time": "08:30",
-            "price_usd": 200,
-            "airline": "Lufthansa",
-            "checked_bag_included": None
-        }]
-        records_with_bag = [{
-            "flight_number": "LH123",
-            "departure_time": "08:30",
-            "price_usd": 250,
-            "airline": "Lufthansa"
-        }]
-        res = process_baggage_comparisons(records, records_with_bag)
-        self.assertEqual(len(res), 1)
-        self.assertFalse(res[0]["checked_bag_included"])
-        self.assertEqual(res[0]["price_with_bag_usd"], 250)
-        self.assertEqual(res[0]["baggage_fee"], 50)
-
-        # 3. Flight not found in records_with_bag (unmatched flight should be included with None values)
-        records = [{
-            "flight_number": "IZ418",
-            "departure_time": "23:00",
-            "price_usd": 150,
-            "airline": "Arkia",
-            "checked_bag_included": None
-        }]
-        records_with_bag = []
-        res = process_baggage_comparisons(records, records_with_bag)
-        self.assertEqual(len(res), 1)
-        self.assertIsNone(res[0]["price_with_bag_usd"])
-        self.assertIsNone(res[0]["checked_bag_included"])
-        self.assertIsNone(res[0]["baggage_fee"])
-
-        # 4. Time normalization (17:30:00 vs 17:30)
-        records = [{
-            "flight_number": "TK100",
-            "departure_time": "17:30:00",
-            "price_usd": 200,
-        }]
-        records_with_bag = [{
-            "flight_number": "TK100",
-            "departure_time": "17:30",
-            "price_usd": 250,
-        }]
-        res = process_baggage_comparisons(records, records_with_bag)
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["baggage_fee"], 50)
-
-        # 5. Fallback matching (flight number matches, but time is completely different)
-        records = [{
-            "flight_number": "TK200",
-            "departure_time": "10:00",
-            "price_usd": 150,
-        }]
-        records_with_bag = [{
-            "flight_number": "TK200",
-            "departure_time": "11:00",  # Different time, wouldn't match normally
-            "price_usd": 210,
-        }]
-        res = process_baggage_comparisons(records, records_with_bag)
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["baggage_fee"], 60)
-
 
 if __name__ == '__main__':
     unittest.main()
+
