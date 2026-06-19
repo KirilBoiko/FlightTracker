@@ -28,9 +28,13 @@ This repository contains tools for:
 pip install pandas numpy scikit-learn xgboost beautifulsoup4 requests matplotlib
 ```
 
-To run the scrapers, you must export an active API key:
+To run the scrapers, you must export your active API keys:
 ```bash
-export SCRAPINGBEE_API_KEY="your_api_key"
+# Required for kayak_scraper.py (JS rendering)
+export SCRAPINGBEE_API_KEY="your_scrapingbee_key"
+
+# Required for flight_tracker_searchapi.py (Google Flights & Historical Pricing)
+export SEARCHAPI_API_KEY="your_searchapi_key"
 ```
 
 ## Note on Repository Maintenance
