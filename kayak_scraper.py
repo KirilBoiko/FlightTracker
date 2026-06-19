@@ -2,7 +2,7 @@
 """
 kayak_scraper.py
 ================
-Scrapes daily cheapest flight prices from Kayak for July 2026 across four
+Scrapes daily cheapest flight prices from Kayak for July, August, and September 2026 across four
 bidirectional routes, using the ScrapingBee API for JS rendering and
 premium residential proxies to defeat Kayak's bot-protection stack.
 
@@ -29,7 +29,7 @@ Usage:
     python3 kayak_scraper.py
 
 Output:
-    kayak_route_economics_july2026.csv
+    kayak_route_economics_july_to_sept_2026.csv
     api_responses/raw/kayak_<route>_<date>.html  (one file per request)
 
 IMPORTANT — Credit cost estimate:
@@ -83,10 +83,10 @@ ROUTES: list[tuple[str, str]] = [
     ("TLV", "BUS"),
 ]
 
-SEPT_2026_START = datetime.date(2026, 9, 1)     # Sept 1
-SEPT_2026_DAYS  = 30                            # 30 days of Sept
+Q3_2026_START = datetime.date(2026, 7, 1)     # July 1
+Q3_2026_DAYS  = 92                            # 92 days (July, Aug, Sept)
 
-OUTPUT_CSV    = "kayak_route_economics_reparsed.csv"
+OUTPUT_CSV    = "kayak_route_economics_july_to_sept_2026.csv"
 RAW_HTML_DIR  = Path("api_responses") / "kayak_raw"
 
 # ScrapingBee parameters
@@ -468,9 +468,9 @@ def parse_kayak_html(
             if price_str is None:
                 continue
 
-            # Deduplicate by flight footprint (time + price + date)
-            # The user requested to remove flights at the same time and price and date
-            flight_key = f"{date_str}_{dep_time}_{price_str}"
+            # Deduplicate by strict flight footprint (date + times + airline + price + stops)
+            # The user requested to remove duplicates that are the exact same flight
+            flight_key = f"{date_str}_{dep_time}_{arr_time}_{airline}_{price_str}_{stops}"
             if flight_key in seen_prices:
                 continue
             seen_prices.add(flight_key)
@@ -526,16 +526,16 @@ def append_checkpoint(records: list[dict], filepath: str, is_first_write: bool) 
 # ---------------------------------------------------------------------------
 def main() -> None:
     logger.info("=" * 70)
-    logger.info("Kayak Flight Scraper — September 2026  (via ScrapingBee)")
+    logger.info("Kayak Flight Scraper — Q3 2026 (July-Sept) (via ScrapingBee)")
     logger.info(f"  Routes  : {' | '.join(f'{o}→{d}' for o, d in ROUTES)}")
-    logger.info(f"  Period  : 2026-09-01 → 2026-09-30  ({SEPT_2026_DAYS} days)")
+    logger.info(f"  Period  : 2026-07-01 → 2026-09-30  ({Q3_2026_DAYS} days)")
     logger.info(f"  Output  : {OUTPUT_CSV}")
     logger.info(f"  Log     : {log_filename}")
     logger.info("=" * 70)
 
     api_key = get_api_key()
 
-    total_requests  = len(ROUTES) * SEPT_2026_DAYS
+    total_requests  = len(ROUTES) * Q3_2026_DAYS
     logger.info(
         f"\n⚠  Credit estimate: {total_requests} requests × 75 credits "
         f"= ~{total_requests * 75:,} ScrapingBee credits.\n"
@@ -551,7 +551,7 @@ def main() -> None:
     else:
         logger.info(f"Found existing '{OUTPUT_CSV}' — will append new data to it.")
 
-    url_iter = kayak_url_generator(ROUTES, SEPT_2026_START, SEPT_2026_DAYS)
+    url_iter = kayak_url_generator(ROUTES, Q3_2026_START, Q3_2026_DAYS)
     request_num = 0
 
     for origin, dest, date_str, url in url_iter:
@@ -595,7 +595,7 @@ def main() -> None:
 
     # ── Final DataFrame + CSV ─────────────────────────────────────────────
     logger.info(f"\n{'=' * 70}")
-    logger.info("All requests complete. Building final dataset...")
+    logger.info("All requests complete. Cleaning and sorting final dataset...")
 
     if not all_records:
         logger.error(
@@ -605,7 +605,16 @@ def main() -> None:
         )
         sys.exit(1)
 
-    df_new = pd.DataFrame(all_records)
+    # Read the file that we've been appending checkpoints to
+    out_path = Path(OUTPUT_CSV)
+    if out_path.exists():
+        try:
+            df = pd.read_csv(out_path)
+        except Exception as e:
+            logger.warning(f"Could not read existing CSV for final clean: {e}. Using memory records.")
+            df = pd.DataFrame(all_records)
+    else:
+        df = pd.DataFrame(all_records)
 
     column_order = [
         "snapshot_ts", "scrape_source",
@@ -613,20 +622,17 @@ def main() -> None:
         "airline", "dep_time", "arr_time", "duration", "stops",
         "price_usd",
     ]
-    df_new = df_new[[c for c in column_order if c in df_new.columns]]
+    df = df[[c for c in column_order if c in df.columns]]
 
-    # If the file already existed, load it and combine with the new data
-    out_path = Path(OUTPUT_CSV)
-    if out_path.exists():
-        try:
-            df_old = pd.read_csv(out_path)
-            df = pd.concat([df_old, df_new], ignore_index=True)
-            logger.info(f"Merged {len(df_new)} new records with {len(df_old)} existing records.")
-        except Exception as e:
-            logger.warning(f"Could not read existing CSV for merge: {e}. Writing only new records.")
-            df = df_new
-    else:
-        df = df_new
+    # Deduplicate strictly across the entire dataset (keeping cheapest)
+    initial_len = len(df)
+    df['price_usd'] = pd.to_numeric(df['price_usd'], errors='coerce')
+    df = df.sort_values('price_usd')
+    dedup_cols = ['origin', 'destination', 'depart_date', 'airline', 'dep_time']
+    df = df.drop_duplicates(subset=dedup_cols, keep='first')
+    
+    if len(df) < initial_len:
+        logger.info(f"Removed {initial_len - len(df)} duplicate records across the dataset.")
 
     # Sort: route → date → price
     df.sort_values(
@@ -636,7 +642,7 @@ def main() -> None:
     )
     df.reset_index(drop=True, inplace=True)
 
-    # Re-write the final sorted file (contains both old and new data)
+    # Re-write the final sorted and deduplicated file
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
 
     # ── Summary ──────────────────────────────────────────────────────────

@@ -18,3 +18,9 @@ scratch/
 
 # Env / secrets
 .env
+
+# Models and outputs
+*.pkl
+*.png
+price_history_charts/
+price_history_charts_v2/

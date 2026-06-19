@@ -4,7 +4,7 @@ Flight Price Tracker — TBS/TLV/BUS Multi-Route (SearchApi.io version)
 =====================================================================
 This script tracks flight prices across four routes:
   TBS → TLV, TBS → BUS, TLV → TBS, BUS → TBS
-for every departure date in July 2026. It collects the top 5 cheapest
+for every departure date in July, August, and September 2026. It collects the top 5 cheapest
 flights per route/date and appends them to a historical CSV dataset.
 
 Installation:
@@ -53,7 +53,7 @@ ROUTES = [
     ("TLV", "BUS"),
 ]
 SEARCHAPI_URL = "https://www.searchapi.io/api/v1/search"
-CSV_FILE_NAME = "july_2026_pricing_data.csv"
+CSV_FILE_NAME = "q3_2026_pricing_data_searchapi.csv"
 SLEEP_DELAY_SECONDS = 2.0
 
 
@@ -181,6 +181,28 @@ def fetch_flights(origin: str, destination: str, departure_date: str, api_key: s
     except ValueError:
         days_till_departure = None
 
+    # ── Price Insights from Google Flights ───────────────────────────────────
+    # Google returns route-level price context that is very valuable as a
+    # model feature even though it is not broken down by individual airline.
+    pi = results.get("price_insights", {})
+    pi_lowest_price      = pi.get("lowest_price")          # all-time low seen
+    pi_price_level       = pi.get("price_level")            # 'low'/'typical'/'high'
+    pi_typical_low       = (pi.get("typical_price_range") or {}).get("low_price")
+    pi_typical_high      = (pi.get("typical_price_range") or {}).get("high_price")
+
+    # Derive trend from price_history: compare last 7 days vs prior 7 days
+    price_history = pi.get("price_history", [])
+    pi_price_trend_7d = None
+    if len(price_history) >= 14:
+        recent_avg  = sum(h["price"] for h in price_history[-7:])  / 7
+        earlier_avg = sum(h["price"] for h in price_history[-14:-7]) / 7
+        pi_price_trend_7d = round(recent_avg - earlier_avg, 2)  # positive = rising
+
+    # How far is today's lowest price from the historical typical low?
+    pi_price_vs_typical_low = None
+    if pi_lowest_price and pi_typical_low:
+        pi_price_vs_typical_low = round(pi_lowest_price - pi_typical_low, 2)
+
     # Deduplicate by flight number + departure time, keeping cheapest price
     flights_by_key = {}
 
@@ -225,17 +247,24 @@ def fetch_flights(origin: str, destination: str, departure_date: str, api_key: s
         price_usd = parse_price(fare.get("price"), fallback="N/A")
 
         flights_by_key[match_key] = {
-            "snapshot_date": snapshot_date,
-            "departure_date": departure_date,
-            "days_till_departure": days_till_departure,
-            "destination": destination,
-            "airline": airline_name,
-            "flight_number": flight_no,
-            "departure_time": dep_time_display,
-            "aircraft": airplane_name,
-            "price_usd": price_usd,
-            "duration_minutes": int(duration) if duration is not None else None,
-            "is_direct": True,
+            "snapshot_date":            snapshot_date,
+            "departure_date":           departure_date,
+            "days_till_departure":      days_till_departure,
+            "destination":              destination,
+            "airline":                  airline_name,
+            "flight_number":            flight_no,
+            "departure_time":           dep_time_display,
+            "aircraft":                 airplane_name,
+            "price_usd":                price_usd,
+            "duration_minutes":         int(duration) if duration is not None else None,
+            "is_direct":                True,
+            # ── Price Insights (route-level, from Google Flights) ──────────
+            "pi_lowest_price":          pi_lowest_price,
+            "pi_price_level":           pi_price_level,
+            "pi_typical_low":           pi_typical_low,
+            "pi_typical_high":          pi_typical_high,
+            "pi_price_trend_7d":        pi_price_trend_7d,
+            "pi_price_vs_typical_low":  pi_price_vs_typical_low,
         }
 
     flights_records = list(flights_by_key.values())
@@ -269,6 +298,13 @@ def append_to_csv(records: list, file_name: str) -> None:
         "price_usd",
         "duration_minutes",
         "is_direct",
+        # Price Insights columns
+        "pi_lowest_price",
+        "pi_price_level",
+        "pi_typical_low",
+        "pi_typical_high",
+        "pi_price_trend_7d",
+        "pi_price_vs_typical_low",
     ]
     df = df[columns_order]
 
@@ -284,11 +320,11 @@ def main():
 
     api_key = get_api_key()
 
-    # All departure dates in July 2026
-    july_start = datetime.date(2026, 7, 1)
+    # All departure dates in July, August, and September 2026
+    q3_start = datetime.date(2026, 7, 1)
     target_dates = [
-        (july_start + datetime.timedelta(days=i)).isoformat()
-        for i in range(31)
+        (q3_start + datetime.timedelta(days=i)).isoformat()
+        for i in range(92)
     ]
 
     logger.info(f"System date: {datetime.date.today()}")
