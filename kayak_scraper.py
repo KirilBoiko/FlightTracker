@@ -544,12 +544,14 @@ def main() -> None:
     all_records:    list[dict] = []
     success_count:  int = 0
     failure_count:  int = 0
-    is_first_write: bool = not Path(OUTPUT_CSV).exists()
-
-    if is_first_write:
-        logger.info(f"No existing '{OUTPUT_CSV}' found — will create a new one.")
-    else:
-        logger.info(f"Found existing '{OUTPUT_CSV}' — will append new data to it.")
+    
+    # Always start fresh — delete any existing CSV for this run
+    out_path = Path(OUTPUT_CSV)
+    if out_path.exists():
+        out_path.unlink()
+        logger.info(f"Removed existing '{OUTPUT_CSV}' — creating fresh file.")
+    
+    is_first_write: bool = True
 
     url_iter = kayak_url_generator(ROUTES, Q3_2026_START, Q3_2026_DAYS)
     request_num = 0
