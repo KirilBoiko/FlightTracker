@@ -53,6 +53,8 @@ import pandas as pd
 from pathlib import Path
 from bs4 import BeautifulSoup, Tag
 from typing import Iterator, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # ---------------------------------------------------------------------------
 # Logging — structured, timestamped, written to both stdout and a log file
@@ -524,99 +526,134 @@ def append_checkpoint(records: list[dict], filepath: str, is_first_write: bool) 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Per-route worker — runs inside its own thread
+# ---------------------------------------------------------------------------
+def scrape_route(
+    origin: str,
+    dest: str,
+    api_key: str,
+    temp_csv: Path,
+) -> tuple[int, int]:
+    """
+    Scrapes all Q3_2026_DAYS dates for a single route and writes records
+    to a per-route temporary CSV.  Returns (success_count, failure_count).
+    """
+    route_label = f"{origin}→{dest}"
+    success_count = 0
+    failure_count = 0
+    is_first_write = True
+    total = Q3_2026_DAYS
+
+    for offset in range(total):
+        dep_date = Q3_2026_START + datetime.timedelta(days=offset)
+        date_str = dep_date.isoformat()
+        url = (
+            f"https://www.kayak.com/flights/{origin}-{dest}/{date_str}"
+            f"?sort=price_a&stops=~0"
+        )
+        label = f"{route_label} {date_str} (day {offset+1}/{total})"
+        logger.info(f"[{route_label}] Processing: {label}")
+
+        html = fetch_via_scrapingbee(url, api_key, label)
+
+        if html is None:
+            failure_count += 1
+            delay = random.uniform(DELAY_MIN, DELAY_MAX)
+            time.sleep(delay)
+            continue
+
+        save_raw_html(html, origin, dest, date_str)
+        records = parse_kayak_html(html, origin, dest, date_str)
+
+        if records:
+            append_checkpoint(records, str(temp_csv), is_first_write)
+            is_first_write = False
+            success_count += 1
+        else:
+            failure_count += 1
+
+        if offset < total - 1:
+            delay = random.uniform(DELAY_MIN, DELAY_MAX)
+            time.sleep(delay)
+
+    logger.info(f"[{route_label}] ✓ Done — {success_count} ok / {failure_count} failed.")
+    return success_count, failure_count
+
+
 def main() -> None:
     logger.info("=" * 70)
     logger.info("Kayak Flight Scraper — Q3 2026 (July-Sept) (via ScrapingBee)")
     logger.info(f"  Routes  : {' | '.join(f'{o}→{d}' for o, d in ROUTES)}")
     logger.info(f"  Period  : 2026-07-01 → 2026-09-30  ({Q3_2026_DAYS} days)")
+    logger.info(f"  Workers : {len(ROUTES)} concurrent sessions (one per route)")
     logger.info(f"  Output  : {OUTPUT_CSV}")
     logger.info(f"  Log     : {log_filename}")
     logger.info("=" * 70)
 
     api_key = get_api_key()
 
-    total_requests  = len(ROUTES) * Q3_2026_DAYS
+    total_requests = len(ROUTES) * Q3_2026_DAYS
     logger.info(
         f"\n⚠  Credit estimate: {total_requests} requests × 75 credits "
-        f"= ~{total_requests * 75:,} ScrapingBee credits.\n"
+        f"= ~{total_requests * 75:,} ScrapingBee credits (all 4 routes run simultaneously).\n"
     )
 
-    all_records:    list[dict] = []
-    success_count:  int = 0
-    failure_count:  int = 0
-    
-    # Always start fresh — delete any existing CSV for this run
+    # Always start fresh — delete any existing output CSV for this run
     out_path = Path(OUTPUT_CSV)
     if out_path.exists():
         out_path.unlink()
         logger.info(f"Removed existing '{OUTPUT_CSV}' — creating fresh file.")
-    
-    is_first_write: bool = True
 
-    url_iter = kayak_url_generator(ROUTES, Q3_2026_START, Q3_2026_DAYS)
-    request_num = 0
+    # Create one temp CSV per route (avoids file-write conflicts between threads)
+    temp_csvs: dict[tuple[str, str], Path] = {
+        (o, d): Path(f"_temp_{o}_{d}.csv") for o, d in ROUTES
+    }
+    for p in temp_csvs.values():
+        if p.exists():
+            p.unlink()
 
-    for origin, dest, date_str, url in url_iter:
-        request_num += 1
-        label = f"{origin}→{dest} {date_str} (req {request_num}/{total_requests})"
-        logger.info(f"\n{'─' * 70}")
-        logger.info(f"Processing: {label}")
-        logger.info(f"  URL: {url}")
+    # ── Launch 4 concurrent scraping sessions ────────────────────────────
+    logger.info(f"Launching {len(ROUTES)} concurrent scraping sessions...\n")
+    total_success = 0
+    total_failure = 0
 
-        # ── Fetch ────────────────────────────────────────────────────────
-        html = fetch_via_scrapingbee(url, api_key, label)
+    with ThreadPoolExecutor(max_workers=len(ROUTES)) as executor:
+        futures = {
+            executor.submit(scrape_route, o, d, api_key, temp_csvs[(o, d)]): (o, d)
+            for o, d in ROUTES
+        }
+        for future in as_completed(futures):
+            o, d = futures[future]
+            try:
+                s, f = future.result()
+                total_success += s
+                total_failure += f
+            except Exception as e:
+                logger.error(f"Route {o}→{d} raised an unexpected error: {e}")
 
-        if html is None:
-            failure_count += 1
-            # Sleep even on failure to avoid hammering ScrapingBee
-            delay = random.uniform(DELAY_MIN, DELAY_MAX)
-            logger.info(f"  Sleeping {delay:.1f}s after failure...")
-            time.sleep(delay)
-            continue
-
-        # ── Archive raw HTML ─────────────────────────────────────────────
-        save_raw_html(html, origin, dest, date_str)
-
-        # ── Parse ────────────────────────────────────────────────────────
-        records = parse_kayak_html(html, origin, dest, date_str)
-
-        if records:
-            all_records.extend(records)
-            success_count += 1
-            # Checkpoint: persist immediately so no data is lost on crash
-            append_checkpoint(records, OUTPUT_CSV, is_first_write)
-            is_first_write = False
-        else:
-            failure_count += 1
-
-        # ── Rate-limit sleep ─────────────────────────────────────────────
-        if request_num < total_requests:
-            delay = random.uniform(DELAY_MIN, DELAY_MAX)
-            logger.info(f"  Rate-limit pause: {delay:.1f}s until next request...")
-            time.sleep(delay)
-
-    # ── Final DataFrame + CSV ─────────────────────────────────────────────
+    # ── Merge all 4 temp CSVs into final output ───────────────────────────
     logger.info(f"\n{'=' * 70}")
-    logger.info("All requests complete. Cleaning and sorting final dataset...")
+    logger.info("All sessions complete. Merging and cleaning final dataset...")
 
-    if not all_records:
+    dfs = []
+    for (o, d), temp_path in temp_csvs.items():
+        if temp_path.exists():
+            try:
+                dfs.append(pd.read_csv(temp_path))
+                temp_path.unlink()  # clean up temp file
+            except Exception as e:
+                logger.warning(f"Could not read temp file {temp_path}: {e}")
+
+    if not dfs:
         logger.error(
-            "No records were collected. The output CSV will not be created.\n"
+            "No records were collected across any route.\n"
             "Check the saved raw HTML files in api_responses/kayak_raw/ for\n"
-            "CAPTCHA pages or empty responses to diagnose the issue."
+            "CAPTCHA pages or empty responses."
         )
         sys.exit(1)
 
-    # Read the file that we've been appending checkpoints to
-    out_path = Path(OUTPUT_CSV)
-    if out_path.exists():
-        try:
-            df = pd.read_csv(out_path)
-        except Exception as e:
-            logger.warning(f"Could not read existing CSV for final clean: {e}. Using memory records.")
-            df = pd.DataFrame(all_records)
-    else:
-        df = pd.DataFrame(all_records)
+    df = pd.concat(dfs, ignore_index=True)
 
     column_order = [
         "snapshot_ts", "scrape_source",
@@ -626,15 +663,14 @@ def main() -> None:
     ]
     df = df[[c for c in column_order if c in df.columns]]
 
-    # Deduplicate strictly across the entire dataset (keeping cheapest)
+    # Deduplicate across the entire merged dataset (keep cheapest)
     initial_len = len(df)
-    df['price_usd'] = pd.to_numeric(df['price_usd'], errors='coerce')
-    df = df.sort_values('price_usd')
-    dedup_cols = ['origin', 'destination', 'depart_date', 'airline', 'dep_time']
-    df = df.drop_duplicates(subset=dedup_cols, keep='first')
-    
+    df["price_usd"] = pd.to_numeric(df["price_usd"], errors="coerce")
+    df = df.sort_values("price_usd")
+    dedup_cols = ["origin", "destination", "depart_date", "airline", "dep_time"]
+    df = df.drop_duplicates(subset=dedup_cols, keep="first")
     if len(df) < initial_len:
-        logger.info(f"Removed {initial_len - len(df)} duplicate records across the dataset.")
+        logger.info(f"Removed {initial_len - len(df)} duplicate records.")
 
     # Sort: route → date → price
     df.sort_values(
@@ -643,17 +679,15 @@ def main() -> None:
         inplace=True,
     )
     df.reset_index(drop=True, inplace=True)
-
-    # Re-write the final sorted and deduplicated file
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
 
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info("=" * 70)
     logger.info("Run Summary")
     logger.info("-" * 70)
-    logger.info(f"  Total requests made      : {request_num}")
-    logger.info(f"  Successful pages parsed  : {success_count}")
-    logger.info(f"  Failed / empty pages     : {failure_count}")
+    logger.info(f"  Concurrent sessions      : {len(ROUTES)}")
+    logger.info(f"  Successful pages parsed  : {total_success}")
+    logger.info(f"  Failed / empty pages     : {total_failure}")
     logger.info(f"  Total flight records     : {len(df)}")
     logger.info(f"  Output CSV               : {OUTPUT_CSV}")
     logger.info(f"  Raw HTML archives        : {RAW_HTML_DIR}/")
