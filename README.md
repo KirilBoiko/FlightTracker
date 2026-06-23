@@ -128,6 +128,17 @@ Look inside the `main()` function around line 324:
     ]
 ```
 
+### Changing the Plotter's Data Source
+By default, the analytics plotter (`plot_price_history_v2.py`) looks for a specific CSV file name to generate charts. If you want to plot data from the Kayak scraper or the SearchAPI scraper, you need to point the script to the correct output file.
+
+Open `plot_price_history_v2.py` and change the `CSV_PATH` variable near line 26:
+```python
+# Change this to point to your specific scraped file:
+# Example: "combined_q3_2026_flights.csv" (from Kayak)
+# Example: "q3_2026_pricing_data_searchapi_enriched.csv" (from Google)
+CSV_PATH   = "price_history_q3_2026.csv"
+```
+
 ---
 
 ## Important Notes on Data Storage
