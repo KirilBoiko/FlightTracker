@@ -24,3 +24,10 @@ scratch/
 *.png
 price_history_charts/
 price_history_charts_v2/
+
+# Local Analytics & ML scripts
+plot_price_history_v2.py
+pricing_engine.py
+simulate_sales.py
+train_xgboost.py
+timesfm_pricing/
