@@ -86,6 +86,43 @@ python3 plot_price_history_v2.py
 
 ---
 
+## Configuration: Changing Routes and Dates
+
+If you want to track different destinations or change the time period being scraped, you will need to edit the Python files directly.
+
+### Changing Destinations
+In both `kayak_scraper.py` and `flight_tracker_searchapi.py`, look for the `ROUTES` list near the top of the file:
+```python
+ROUTES = [
+    ("TBS", "TLV"),
+    ("TLV", "TBS"),
+    # Add new routes using their IATA codes here:
+    ("JFK", "LHR"), 
+]
+```
+
+### Changing the Scraping Dates
+Currently, the scrapers are configured to scrape flights for a 92-day period starting from July 1, 2026. 
+
+**To change this in `kayak_scraper.py`:**
+Look for these constants near line 88:
+```python
+Q3_2026_START = datetime.date(2026, 7, 1)     # Set your start date here
+Q3_2026_DAYS  = 92                            # Number of days to scrape forward
+```
+
+**To change this in `flight_tracker_searchapi.py`:**
+Look inside the `main()` function around line 324:
+```python
+    q3_start = datetime.date(2026, 7, 1)      # Set your start date here
+    target_dates = [
+        (q3_start + datetime.timedelta(days=i)).isoformat()
+        for i in range(92)                    # Number of days to scrape forward
+    ]
+```
+
+---
+
 ## Important Notes on Data Storage
 These scripts generate large amounts of CSV data. To keep the code repository clean and fast, **all `.csv` files are explicitly excluded via `.gitignore`**. 
 
