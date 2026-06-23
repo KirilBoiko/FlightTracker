@@ -1,6 +1,6 @@
 # Flight Pricing Data Scrapers
 
-This repository contains automated tools designed to extract real-time and historical flight pricing data from major aggregators (Kayak and Google Flights). 
+This repository contains automated tools designed to extract and visualize real-time and historical flight pricing data from major aggregators (Kayak and Google Flights). 
 
 By acting as a distributed network of hidden browsers, these tools allow us to continuously monitor competitors' pricing changes and build a proprietary dataset of market prices without being blocked by anti-bot protections.
 
@@ -8,7 +8,7 @@ By acting as a distributed network of hidden browsers, these tools allow us to c
 
 ## The Scrapers
 
-The system relies on two distinct scraping scripts, each serving a specific purpose:
+The system relies on two distinct scraping scripts and an analytics visualizer, each serving a specific purpose:
 
 ### 1. The Kayak Scraper (`kayak_scraper.py`)
 **Purpose:** Scrape live, real-time ticket prices and flight inventory directly from Kayak's search results.
@@ -29,6 +29,14 @@ While Kayak tells us the price *today*, Google Flights has a unique feature that
 1.  This script utilizes the **SearchAPI** service, which provides a dedicated endpoint to cleanly interact with Google Flights.
 2.  It extracts the Google Flights "Price Insights" module, giving us crucial historical baselines and identifying exactly where current prices sit relative to the market average over the past 90 days.
 
+### 3. The Price Analytics Visualizer (`plot_price_history_v2.py`)
+**Purpose:** Transform raw CSV pricing data into understandable analytical charts and visualizations.
+
+**How it Works:** 
+Raw scraped data is hard to interpret. This script reads the generated CSV datasets and builds high-resolution visual reports:
+1.  It maps out the booking curve, showing exactly how prices rise or drop as the departure date approaches.
+2.  It generates heatmaps identifying the cheapest windows to book and highlights periods of extreme price volatility.
+3.  Charts are output directly as PNG files into designated analytics folders.
 ---
 
 ## Setup & Installation
@@ -36,7 +44,7 @@ While Kayak tells us the price *today*, Google Flights has a unique feature that
 ### 1. Requirements
 Ensure you have Python 3 installed. Install the required dependencies:
 ```bash
-pip install pandas requests beautifulsoup4
+pip install pandas requests beautifulsoup4 matplotlib
 ```
 
 ### 2. Environment Variables (API Keys)
@@ -68,6 +76,13 @@ To collect historical price insights, run:
 python3 flight_tracker_searchapi.py
 ```
 *   **What to expect:** This script runs much faster as it relies on an established API rather than rendering full browser sessions. It will output an enriched dataset (e.g., `q3_2026_pricing_data_searchapi_enriched.csv`) containing the historical insight metrics.
+
+### Generating Analytical Charts
+To convert the scraped CSV data into visual charts, run:
+```bash
+python3 plot_price_history_v2.py
+```
+*   **What to expect:** The script will process the latest CSV data and generate a series of `.png` charts inside the `price_history_charts_v2/` directory, illustrating price bands, booking window heatmaps, and route comparisons.
 
 ---
 
