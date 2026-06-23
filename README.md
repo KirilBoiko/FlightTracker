@@ -1,41 +1,77 @@
-# Dynamic Pricing & Flight Analytics Engine
+# Flight Pricing Data Scrapers
 
-An end-to-end Machine Learning pipeline and Dynamic Pricing Engine built to optimize revenue management and predict market pricing behavior in the aviation sector.
+This repository contains automated tools designed to extract real-time and historical flight pricing data from major aggregators (Kayak and Google Flights). 
 
-## Overview
+By acting as a distributed network of hidden browsers, these tools allow us to continuously monitor competitors' pricing changes and build a proprietary dataset of market prices without being blocked by anti-bot protections.
 
-This repository contains tools for:
-1.  **Data Extraction:** Automated web scrapers targeting Google Flights and Kayak.
-2.  **Predictive Modeling:** An XGBoost Regressor that accurately forecasts the prices of competitors based on historical price curves, seasonality, and advance-purchase windows.
-3.  **Prescriptive Pricing Engine:** An algorithmic engine that simulates real-world airline dynamic pricing—setting its own ticket prices by blending competitor baselines with internal load factor (unsold seats) pacing.
+---
 
-## Core Architecture
+## The Scrapers
 
-*   `kayak_scraper.py` / `flight_tracker_searchapi.py`
-    *   Web scrapers integrating headless browser rendering via ScrapingBee to extract live flight inventory and JSON payload metadata from aggregators.
-*   `train_xgboost.py`
-    *   ETL and ML script. Normalizes JSON/CSV payloads, engineers time-series lag features, and trains the `XGBRegressor` on historical pricing behavior.
-*   `pricing_engine.py`
-    *   The Dynamic Pricer. Queries the XGBoost model for market baselines and applies yield-optimization rules (surges and discounts based on target booking curves).
-*   `simulate_sales.py`
-    *   Monte Carlo-style simulator used to stress-test the pricing engine under various demand and elasticity constraints over a 90-day booking window.
-*   `plot_price_history_v2.py`
-    *   Analytics and visualization suite using Matplotlib to map out booking window sweet spots and price volatility curves.
+The system relies on two distinct scraping scripts, each serving a specific purpose:
 
-## Setup
+### 1. The Kayak Scraper (`kayak_scraper.py`)
+**Purpose:** Scrape live, real-time ticket prices and flight inventory directly from Kayak's search results.
 
+**How it Works:** 
+Kayak is highly aggressive at blocking automated bots. To get around this, we use a service called **ScrapingBee**. ScrapingBee routes our requests through residential proxy networks and renders the page in a real, hidden Chrome browser instance.
+The script performs the following:
+1.  It iterates through our defined routes (e.g., TBS to TLV, TLV to TBS).
+2.  It opens 4 concurrent browser sessions simultaneously using a `ThreadPoolExecutor`. This parallelization reduces a 6-hour data collection job down to just ~1.5 hours.
+3.  It bypasses cookie banners, waits for the flight results to fully load via JavaScript, and intercepts the hidden JSON payloads that contain the pricing data.
+4.  It normalizes and saves the extracted data into a structured CSV format.
+
+### 2. The Google Flights Scraper (`flight_tracker_searchapi.py`)
+**Purpose:** Extract historical pricing curves and "Price Insights" from Google Flights.
+
+**How it Works:** 
+While Kayak tells us the price *today*, Google Flights has a unique feature that shows if a price is "Typical", "Low", or "High" based on historical averages. 
+1.  This script utilizes the **SearchAPI** service, which provides a dedicated endpoint to cleanly interact with Google Flights.
+2.  It extracts the Google Flights "Price Insights" module, giving us crucial historical baselines and identifying exactly where current prices sit relative to the market average over the past 90 days.
+
+---
+
+## Setup & Installation
+
+### 1. Requirements
+Ensure you have Python 3 installed. Install the required dependencies:
 ```bash
-pip install pandas numpy scikit-learn xgboost beautifulsoup4 requests matplotlib
+pip install pandas requests beautifulsoup4
 ```
 
-To run the scrapers, you must export your active API keys:
+### 2. Environment Variables (API Keys)
+Because these scripts rely on third-party proxy and rendering services to avoid getting banned, you must export your API keys before running them:
+
 ```bash
-# Required for kayak_scraper.py (JS rendering)
-export SCRAPINGBEE_API_KEY="your_scrapingbee_key"
+# Required for kayak_scraper.py
+export SCRAPINGBEE_API_KEY="your_scrapingbee_api_key_here"
 
-# Required for flight_tracker_searchapi.py (Google Flights & Historical Pricing)
-export SEARCHAPI_API_KEY="your_searchapi_key"
+# Required for flight_tracker_searchapi.py
+export SEARCHAPI_API_KEY="your_searchapi_api_key_here"
 ```
+*(Contact the administrator if you do not have access to these keys).*
 
-## Note on Repository Maintenance
-This repository has been cleaned of all temporary, deprecated, and intermediate data files. All raw CSV and JSON datasets, as well as the compiled `.pkl` model artifacts, are excluded via `.gitignore` to preserve repository hygiene.
+---
+
+## How to Use the Scrapers
+
+### Running the Kayak Scraper
+To collect the daily real-time pricing data across all routes, simply run:
+```bash
+python3 kayak_scraper.py
+```
+*   **What to expect:** The script will output its progress to the terminal. It creates temporary CSV files for each route as it runs (e.g., `_temp_TBS_TLV.csv`). Once all 4 concurrent threads finish, it merges them into a final output file (e.g., `combined_q3_2026_flights.csv`) and automatically deletes the temporary files.
+
+### Running the Google Flights Scraper
+To collect historical price insights, run:
+```bash
+python3 flight_tracker_searchapi.py
+```
+*   **What to expect:** This script runs much faster as it relies on an established API rather than rendering full browser sessions. It will output an enriched dataset (e.g., `q3_2026_pricing_data_searchapi_enriched.csv`) containing the historical insight metrics.
+
+---
+
+## Important Notes on Data Storage
+These scripts generate large amounts of CSV data. To keep the code repository clean and fast, **all `.csv` files are explicitly excluded via `.gitignore`**. 
+
+The generated data files will remain on your local machine, but they will not be uploaded or synced to GitHub. If you need to share the raw datasets, do so via secure cloud storage or your internal data warehouse.
