@@ -40,6 +40,10 @@ Raw scraped data is hard to interpret. This script reads the generated CSV datas
 1.  It maps out the booking curve, showing exactly how prices rise or drop as the departure date approaches.
 2.  It generates heatmaps identifying the cheapest windows to book and highlights periods of extreme price volatility.
 3.  Charts are output directly as PNG files into designated analytics folders.
+
+*Example Output:*
+![Price Analytics Example](assets/monthly_curves_example.png)
+
 ---
 
 ## Setup & Installation
