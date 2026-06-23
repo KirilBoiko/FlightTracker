@@ -9,7 +9,7 @@ By acting as a distributed network of hidden browsers, these tools allow us to c
 ## The Scrapers
 
 **Why do we need two different scrapers?**
-The primary reason is a trade-off between volume and historical context. The Google Flights API does not show all available flights for these routes, meaning it misses a large portion of the market inventory. However, for the flights it *does* show, it provides critical historical price curves. Conversely, Kayak shows almost all available flights on the market today, but lacks the historical pricing context. By combining them, we get both total market coverage and historical baselines.
+The reason we need 2 scrapers is that the Google Flights API(SearchAPI) does not show all available flights for these routes, meaning it misses a large portion of the market inventory. However, for the flights it *does* show, it provides critical historical price curves. Conversely, Kayak shows almost all available flights on the market today, but lacks the historical pricing context. By combining them, we get both total market coverage and historical baselines.
 
 The system relies on two distinct scraping scripts and an analytics visualizer, each serving a specific purpose:
 
