@@ -11,7 +11,7 @@ By acting as a distributed network of hidden browsers, these tools allow us to c
 **Why do we need two different scrapers?**
 The reason we need 2 scrapers is that the Google Flights API(SearchAPI) does not show all available flights for these routes, meaning it misses a large portion of the market inventory. However, for the flights it *does* show, it provides critical historical price curves. Conversely, Kayak shows almost all available flights on the market today, but lacks the historical pricing context. By combining them, we get both total market coverage and historical baselines.
 
-The system relies on three distinct scraping scripts and an analytics visualizer, each serving a specific purpose:
+The system relies on two distinct scraping scripts and an analytics visualizer, each serving a specific purpose:
 
 ### 1. The Kayak Scraper (`kayak_scraper.py`)
 **Purpose:** Scrape live, real-time ticket prices and flight inventory directly from Kayak's search results.
@@ -32,17 +32,7 @@ While Kayak tells us the price *today*, Google Flights has a unique feature that
 1.  This script utilizes the **SearchAPI** service, which provides a dedicated endpoint to cleanly interact with Google Flights.
 2.  It extracts the Google Flights "Price Insights" module, giving us crucial historical baselines and identifying exactly where current prices sit relative to the market average over the past 90 days.
 
-### 3. The Flightradar24 Airport Scraper (`fr24_airport_scraper.py`)
-**Purpose:** Extract exact departure and arrival boards for a specific airport (e.g., TBS) and filter for specific flight routes.
-
-**How it Works:**
-Flightradar24 is heavily protected by Cloudflare.
-1. This script bypasses Cloudflare by routing requests through ScrapingBee's premium residential proxies.
-2. It hits Flightradar24's hidden internal JSON API instead of rendering HTML, extracting highly structured data (flight numbers, airlines, scheduled times, aircraft types).
-3. It iterates through multiple dates (e.g., Yesterday, Today, Tomorrow) and processes both *departures* and *arrivals*.
-4. It parses the JSON arrays and filters the data so the final CSV only contains flights arriving from or departing to our target airport (e.g., Tel Aviv / TLV).
-
-### 4. The Price Analytics Visualizer (`plot_price_history_v2.py`)
+### 3. The Price Analytics Visualizer (`plot_price_history_v2.py`)
 **Purpose:** Transform raw CSV pricing data into understandable analytical charts and visualizations.
 
 **How it Works:** 
@@ -94,13 +84,6 @@ python3 flight_tracker_searchapi.py
 ```
 *   **What to expect:** This script runs much faster as it relies on an established API rather than rendering full browser sessions. It will output an enriched dataset (e.g., `q3_2026_pricing_data_searchapi_enriched.csv`) containing the historical insight metrics.
 
-### Running the Flightradar24 Airport Scraper
-To collect the filtered departure and arrival board data for TBS, run:
-```bash
-python3 fr24_airport_scraper.py
-```
-*   **What to expect:** The script will query the API for Yesterday, Today, and Tomorrow. It will print out how many flights it found to/from the target filter (TLV) for each date and output a clean CSV (`fr24_tbs_tlv_filtered_flights.csv`).
-
 ### Generating Analytical Charts
 To convert the scraped CSV data into visual charts, run:
 ```bash
@@ -143,13 +126,6 @@ Look inside the `main()` function around line 324:
         (q3_start + datetime.timedelta(days=i)).isoformat()
         for i in range(92)                    # Number of days to scrape forward
     ]
-```
-
-**To change this in `fr24_airport_scraper.py`:**
-Look inside the `main()` function around line 117 to change the target dates or edit the constants at the top for the target airport:
-```python
-TARGET_AIRPORT = "tbs"
-FILTER_IATA = "TLV"
 ```
 
 ### Changing the Plotter's Data Source

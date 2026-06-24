@@ -30,3 +30,4 @@ pricing_engine.py
 simulate_sales.py
 train_xgboost.py
 timesfm_pricing/
+fr24_airport_scraper.py
