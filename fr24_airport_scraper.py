@@ -114,6 +114,12 @@ def extract_and_filter_flights(data: dict, mode: str, filter_iata: str) -> list:
             origin_iata = flight.get("airport", {}).get("origin", {}).get("code", {}).get("iata", "N/A")
             dest_iata = flight.get("airport", {}).get("destination", {}).get("code", {}).get("iata", "N/A")
             
+            # FR24 API often omits the details for the airport we are directly querying
+            if mode == "departures" and origin_iata == "N/A":
+                origin_iata = TARGET_AIRPORT.upper()
+            if mode == "arrivals" and dest_iata == "N/A":
+                dest_iata = TARGET_AIRPORT.upper()
+            
             # Filter condition
             is_match = False
             if mode == "departures" and dest_iata == filter_iata:
