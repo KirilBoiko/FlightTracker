@@ -85,10 +85,8 @@ ROUTES: list[tuple[str, str]] = [
     ("TLV", "BUS"),
 ]
 
-Q3_2026_START = datetime.date(2026, 7, 1)     # July 1
 Q3_2026_DAYS  = 92                            # 92 days (July, Aug, Sept)
 
-OUTPUT_CSV    = "kayak_route_economics_july_to_sept_2026.csv"
 RAW_HTML_DIR  = Path("api_responses") / "kayak_raw"
 
 # ScrapingBee parameters
@@ -587,7 +585,7 @@ def main() -> None:
     logger.info(f"  Routes  : {' | '.join(f'{o}→{d}' for o, d in ROUTES)}")
     logger.info(f"  Period  : 2026-07-01 → 2026-09-30  ({Q3_2026_DAYS} days)")
     logger.info(f"  Workers : {len(ROUTES)} concurrent sessions (one per route)")
-    logger.info(f"  Output  : {OUTPUT_CSV}")
+    logger.info(f"  Output  : Multiple route-specific CSV files")
     logger.info(f"  Log     : {log_filename}")
     logger.info("=" * 70)
 
@@ -599,19 +597,15 @@ def main() -> None:
         f"= ~{total_requests * 75:,} ScrapingBee credits (all 4 routes run simultaneously).\n"
     )
 
-    # Always start fresh — delete any existing output CSV for this run
-    out_path = Path(OUTPUT_CSV)
-    if out_path.exists():
-        out_path.unlink()
-        logger.info(f"Removed existing '{OUTPUT_CSV}' — creating fresh file.")
-
-    # Create one temp CSV per route (avoids file-write conflicts between threads)
-    temp_csvs: dict[tuple[str, str], Path] = {
-        (o, d): Path(f"_temp_{o}_{d}.csv") for o, d in ROUTES
+    # Create one final CSV per route with the current date
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    final_csvs: dict[tuple[str, str], Path] = {
+        (o, d): Path(f"{today_str}_{o}_to_{d}.csv") for o, d in ROUTES
     }
-    for p in temp_csvs.values():
+    for p in final_csvs.values():
         if p.exists():
             p.unlink()
+            logger.info(f"Removed existing '{p}' — creating fresh file.")
 
     # ── Launch 4 concurrent scraping sessions ────────────────────────────
     logger.info(f"Launching {len(ROUTES)} concurrent scraping sessions...\n")
@@ -620,7 +614,7 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=len(ROUTES)) as executor:
         futures = {
-            executor.submit(scrape_route, o, d, api_key, temp_csvs[(o, d)]): (o, d)
+            executor.submit(scrape_route, o, d, api_key, final_csvs[(o, d)]): (o, d)
             for o, d in ROUTES
         }
         for future in as_completed(futures):
@@ -632,28 +626,9 @@ def main() -> None:
             except Exception as e:
                 logger.error(f"Route {o}→{d} raised an unexpected error: {e}")
 
-    # ── Merge all 4 temp CSVs into final output ───────────────────────────
+    # ── Clean and deduplicate final datasets ───────────────────────────
     logger.info(f"\n{'=' * 70}")
-    logger.info("All sessions complete. Merging and cleaning final dataset...")
-
-    dfs = []
-    for (o, d), temp_path in temp_csvs.items():
-        if temp_path.exists():
-            try:
-                dfs.append(pd.read_csv(temp_path))
-                temp_path.unlink()  # clean up temp file
-            except Exception as e:
-                logger.warning(f"Could not read temp file {temp_path}: {e}")
-
-    if not dfs:
-        logger.error(
-            "No records were collected across any route.\n"
-            "Check the saved raw HTML files in api_responses/kayak_raw/ for\n"
-            "CAPTCHA pages or empty responses."
-        )
-        sys.exit(1)
-
-    df = pd.concat(dfs, ignore_index=True)
+    logger.info("All sessions complete. Cleaning up final datasets...")
 
     column_order = [
         "snapshot_ts", "scrape_source",
@@ -661,25 +636,53 @@ def main() -> None:
         "airline", "dep_time", "arr_time", "duration", "stops",
         "price_usd",
     ]
-    df = df[[c for c in column_order if c in df.columns]]
 
-    # Deduplicate across the entire merged dataset (keep cheapest)
-    initial_len = len(df)
-    df["price_usd"] = pd.to_numeric(df["price_usd"], errors="coerce")
-    df = df.sort_values("price_usd")
-    dedup_cols = ["origin", "destination", "depart_date", "airline", "dep_time"]
-    df = df.drop_duplicates(subset=dedup_cols, keep="first")
-    if len(df) < initial_len:
-        logger.info(f"Removed {initial_len - len(df)} duplicate records.")
+    total_records_saved = 0
+    generated_files = []
 
-    # Sort: route → date → price
-    df.sort_values(
-        by=["origin", "destination", "depart_date", "price_usd"],
-        ascending=True,
-        inplace=True,
-    )
-    df.reset_index(drop=True, inplace=True)
-    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    for (o, d), final_path in final_csvs.items():
+        if final_path.exists():
+            try:
+                df = pd.read_csv(final_path)
+                if df.empty:
+                    continue
+                
+                df = df[[c for c in column_order if c in df.columns]]
+                
+                # Deduplicate (keep cheapest)
+                initial_len = len(df)
+                df["price_usd"] = pd.to_numeric(df["price_usd"], errors="coerce")
+                df = df.sort_values("price_usd")
+                dedup_cols = ["origin", "destination", "depart_date", "airline", "dep_time"]
+                df = df.drop_duplicates(subset=dedup_cols, keep="first")
+                
+                # Sort: route → date → price
+                df.sort_values(
+                    by=["origin", "destination", "depart_date", "price_usd"],
+                    ascending=True,
+                    inplace=True,
+                )
+                df.reset_index(drop=True, inplace=True)
+                df.to_csv(final_path, index=False, encoding="utf-8-sig")
+                
+                total_records_saved += len(df)
+                generated_files.append(str(final_path))
+                
+                if len(df) < initial_len:
+                    logger.info(f"[{o}→{d}] Removed {initial_len - len(df)} duplicate records. Saved {len(df)} total.")
+                else:
+                    logger.info(f"[{o}→{d}] Saved {len(df)} records.")
+                    
+            except Exception as e:
+                logger.warning(f"Could not read/clean final file {final_path}: {e}")
+
+    if not generated_files:
+        logger.error(
+            "No records were collected across any route.\n"
+            "Check the saved raw HTML files in api_responses/kayak_raw/ for\n"
+            "CAPTCHA pages or empty responses."
+        )
+        sys.exit(1)
 
     # ── Summary ──────────────────────────────────────────────────────────
     logger.info("=" * 70)
@@ -688,20 +691,11 @@ def main() -> None:
     logger.info(f"  Concurrent sessions      : {len(ROUTES)}")
     logger.info(f"  Successful pages parsed  : {total_success}")
     logger.info(f"  Failed / empty pages     : {total_failure}")
-    logger.info(f"  Total flight records     : {len(df)}")
-    logger.info(f"  Output CSV               : {OUTPUT_CSV}")
+    logger.info(f"  Total flight records     : {total_records_saved}")
+    logger.info(f"  Output CSVs              : {', '.join(generated_files)}")
     logger.info(f"  Raw HTML archives        : {RAW_HTML_DIR}/")
     logger.info(f"  Run log                  : {log_filename}")
     logger.info("=" * 70)
-
-    # ── Preview ──────────────────────────────────────────────────────────
-    if not df.empty:
-        preview_cols = [
-            "depart_date", "origin", "destination",
-            "price_usd", "airline", "dep_time", "arr_time", "stops",
-        ]
-        logger.info("\nData preview (first 10 rows, sorted cheapest first):")
-        print(df[[c for c in preview_cols if c in df.columns]].head(10).to_string(index=False))
 
 
 if __name__ == "__main__":
