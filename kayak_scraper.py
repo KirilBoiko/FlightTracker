@@ -85,6 +85,7 @@ ROUTES: list[tuple[str, str]] = [
     ("TLV", "BUS"),
 ]
 
+Q3_2026_START = datetime.date(2026, 7, 1)     # July 1
 Q3_2026_DAYS  = 92                            # 92 days (July, Aug, Sept)
 
 RAW_HTML_DIR  = Path("api_responses") / "kayak_raw"
