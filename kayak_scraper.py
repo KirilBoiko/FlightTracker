@@ -300,16 +300,15 @@ def _looks_like_block_page(html: str) -> bool:
 
     Two independent checks:
       1. Known challenge/block phrasing (see _BLOCK_PAGE_SIGNATURES).
-      2. Absence of Kayak's own result-card anchor (data-resultid) AND
-         no price ($NNN) pattern anywhere in the page. A genuine results
-         page — even a near-empty one, even one that only matches via the
-         structural fallback below — always has at least one of these;
-         a pure challenge shell has neither.
+      2. Absence of Kayak's current result-card class (nrc6-mod-pres-default).
+         A genuine results page always has at least one of these cards.
+         A pure challenge shell (Akamai interstitial, CAPTCHA) has none,
+         even if it contains price-like strings in its JS/page chrome.
     """
     lower = html.lower()
     if any(sig in lower for sig in _BLOCK_PAGE_SIGNATURES):
         return True
-    if "data-resultid" not in html and not _PRICE_RE.search(html):
+    if "nrc6-mod-pres-default" not in html:
         return True
     return False
 
