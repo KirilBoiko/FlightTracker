@@ -85,8 +85,8 @@ ROUTES: list[tuple[str, str]] = [
     ("TLV", "BUS"),
 ]
 
-Q3_2026_START = datetime.date(2026, 7, 1)     # July 1
-Q3_2026_DAYS  = 92                            # 92 days (July, Aug, Sept)
+WINTER_2026_START = datetime.date(2026, 10, 1)     # October 1
+WINTER_2026_DAYS  = 182                          # 182 days (Oct -> Mar)
 
 RAW_HTML_DIR  = Path("api_responses") / "kayak_raw"
 
@@ -535,17 +535,17 @@ def scrape_route(
     temp_csv: Path,
 ) -> tuple[int, int]:
     """
-    Scrapes all Q3_2026_DAYS dates for a single route and writes records
+    Scrapes all WINTER_2026_DAYS dates for a single route and writes records
     to a per-route temporary CSV.  Returns (success_count, failure_count).
     """
     route_label = f"{origin}→{dest}"
     success_count = 0
     failure_count = 0
     is_first_write = True
-    total = Q3_2026_DAYS
+    total = WINTER_2026_DAYS
 
     for offset in range(total):
-        dep_date = Q3_2026_START + datetime.timedelta(days=offset)
+        dep_date = WINTER_2026_START + datetime.timedelta(days=offset)
         date_str = dep_date.isoformat()
         url = (
             f"https://www.kayak.com/flights/{origin}-{dest}/{date_str}"
@@ -582,9 +582,9 @@ def scrape_route(
 
 def main() -> None:
     logger.info("=" * 70)
-    logger.info("Kayak Flight Scraper — Q3 2026 (July-Sept) (via ScrapingBee)")
+    logger.info("Kayak Flight Scraper — Winter 2026/27 (Oct-Mar) (via ScrapingBee)")
     logger.info(f"  Routes  : {' | '.join(f'{o}→{d}' for o, d in ROUTES)}")
-    logger.info(f"  Period  : 2026-07-01 → 2026-09-30  ({Q3_2026_DAYS} days)")
+    logger.info(f"  Period  : 2026-10-01 → 2027-03-31  ({WINTER_2026_DAYS} days)")
     logger.info(f"  Workers : {len(ROUTES)} concurrent sessions (one per route)")
     logger.info(f"  Output  : Multiple route-specific CSV files")
     logger.info(f"  Log     : {log_filename}")
@@ -592,7 +592,7 @@ def main() -> None:
 
     api_key = get_api_key()
 
-    total_requests = len(ROUTES) * Q3_2026_DAYS
+    total_requests = len(ROUTES) * WINTER_2026_DAYS
     logger.info(
         f"\n⚠  Credit estimate: {total_requests} requests × 75 credits "
         f"= ~{total_requests * 75:,} ScrapingBee credits (all 4 routes run simultaneously).\n"
