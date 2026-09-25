@@ -2,9 +2,10 @@
 """
 kayak_scraper.py
 ================
-Scrapes daily cheapest flight prices from Kayak for July, August, and September 2026 across four
-bidirectional routes, using the ScrapingBee API for JS rendering and
-premium residential proxies to defeat Kayak's bot-protection stack.
+Scrapes daily cheapest flight prices from Kayak for 01 Oct 2026 – 31 Mar
+2027 across four bidirectional routes, using the ScrapingBee API for JS
+rendering and premium (escalating to stealth) proxies to defeat Kayak's
+bot-protection stack.
 
 Routes:
     TBS (Tbilisi)  → TLV (Tel Aviv)
@@ -19,7 +20,9 @@ Architecture:
     │                      browser)        regex parse)   │
     │                                                      │
     │  Retry layer  →  Raw HTML archive  →  DataFrame     │
-    │  (3 attempts)     (api_responses/)    → CSV export  │
+    │  (3 attempts,     (api_responses/)    → CSV export  │
+    │   escalating to                                      │
+    │   stealth_proxy)                                     │
     └─────────────────────────────────────────────────────┘
 
 Usage:
@@ -29,12 +32,15 @@ Usage:
     python3 kayak_scraper.py
 
 Output:
-    kayak_route_economics_july_to_sept_2026.csv
-    api_responses/raw/kayak_<route>_<date>.html  (one file per request)
+    <date>_TBS_to_TLV.csv, etc.  (one per route)
+    api_responses/kayak_raw/kayak_<route>_<date>.html  (one file per request)
 
 IMPORTANT — Credit cost estimate:
-    ScrapingBee charges 75 credits per request with render_js + premium_proxy.
-    This script makes 4 routes × 31 days = 124 requests → ~9 300 credits.
+    4 routes × 182 days = 728 requests. Best case (everything clears on
+    the first premium_proxy attempt): ~18,200 credits. Worst case
+    (every request exhausts retries into the stealth_proxy escalation):
+    ~72,800 credits. Actual cost will land somewhere in between depending
+    on how often Kayak's anti-bot triggers the escalation.
     Verify your plan quota before running the full set.
 """
 
@@ -169,26 +175,43 @@ def fetch_via_scrapingbee(
     label: str,
 ) -> Optional[str]:
     """
-    Fetches `target_url` via ScrapingBee with JS rendering + premium proxy.
-    Retries up to MAX_RETRIES times with increasing backoff.
+    Fetches `target_url` via ScrapingBee with JS rendering.
+
+    Retries up to MAX_RETRIES times with increasing backoff. The first
+    MAX_RETRIES - 1 attempts use `premium_proxy` (cheaper — 10-25 credits).
+    The FINAL attempt escalates to `stealth_proxy` (75 credits), which is
+    ScrapingBee's tier for sites whose anti-bot has gotten past premium
+    proxies — this is the ladder ScrapingBee itself recommends: start
+    cheap, escalate only when still blocked. Escalating only on the last
+    attempt (rather than always) keeps most requests at the cheaper tier
+    instead of paying the top rate on every single one of the ~728
+    requests this run makes.
 
     Returns the raw HTML string on success, or None if all attempts fail.
     """
-    params = {
-        "api_key":         api_key,
-        "url":             target_url,
-        "render_js":       "true",
-        "premium_proxy":   "true",
-        "country_code":    "us",       # US residential IPs = highest Kayak success rate
-        "wait":            str(JS_WAIT_MS),  # fixed wait — safe even if page is blocked
-        "block_resources": "false",    # keep all JS/CSS so Kayak's app bundle runs
-        "device":          "desktop",  # Kayak mobile layout differs significantly
-    }
 
     for attempt in range(1, MAX_RETRIES + 1):
+        use_stealth = attempt == MAX_RETRIES  # escalate on the last try only
+
+        params = {
+            "api_key":         api_key,
+            "url":             target_url,
+            "render_js":       "true",
+            "country_code":    "us",       # US residential IPs = highest Kayak success rate
+            "wait":            str(JS_WAIT_MS),  # fixed wait — safe even if page is blocked
+            "block_resources": "false",    # keep all JS/CSS so Kayak's app bundle runs
+            "device":          "desktop",  # Kayak mobile layout differs significantly
+        }
+        if use_stealth:
+            params["stealth_proxy"] = "true"
+        else:
+            params["premium_proxy"] = "true"
+
         try:
+            proxy_tier = "stealth_proxy" if use_stealth else "premium_proxy"
             logger.info(
-                f"  [ScrapingBee] Attempt {attempt}/{MAX_RETRIES}: {label}"
+                f"  [ScrapingBee] Attempt {attempt}/{MAX_RETRIES} "
+                f"({proxy_tier}): {label}"
             )
             response = requests.get(
                 SCRAPINGBEE_ENDPOINT,
@@ -204,6 +227,19 @@ def fetch_via_scrapingbee(
                     logger.warning(
                         f"  [ScrapingBee] Response too short ({len(html)} chars) "
                         f"for {label}. Possible bot-block. Retrying..."
+                    )
+                elif _looks_like_block_page(html):
+                    # A FULL-SIZED page that is still just an anti-bot
+                    # interstitial/CAPTCHA shell, not real results. This is
+                    # the case a length check alone misses: Akamai's
+                    # challenge page can be tens of KB of JS/CSS chrome
+                    # with zero flight data, so it used to sail through as
+                    # a "success" and burn the request with no retry.
+                    logger.warning(
+                        f"  [ScrapingBee] {len(html):,} chars received for {label}, "
+                        f"but it looks like a bot-block/interstitial page "
+                        f"(no [data-resultid] markers, or a known challenge "
+                        f"phrase found). Retrying..."
                     )
                 else:
                     logger.info(
@@ -234,6 +270,48 @@ def fetch_via_scrapingbee(
 
     logger.error(f"  [ScrapingBee] All {MAX_RETRIES} attempts failed for {label}. Skipping.")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Bot-block / interstitial detection
+# ---------------------------------------------------------------------------
+# Phrases seen on Akamai Bot Manager interstitials and generic anti-bot
+# block pages. Kayak sits behind Akamai; when its confidence in a request
+# is low it serves a "press & hold" sensor-challenge page or an explicit
+# access-denied page instead of results — usually still HTTP 200, and
+# often large enough (JS/CSS chrome) to pass a bare length check.
+_BLOCK_PAGE_SIGNATURES = (
+    "press and hold",
+    "press & hold",
+    "verify you are human",
+    "verify you're human",
+    "are you a robot",
+    "access denied",
+    "additional security check",
+    "unusual traffic",
+    "reference id",
+)
+
+
+def _looks_like_block_page(html: str) -> bool:
+    """
+    True if `html` is a full-sized response that is still an anti-bot
+    interstitial rather than a real Kayak results page.
+
+    Two independent checks:
+      1. Known challenge/block phrasing (see _BLOCK_PAGE_SIGNATURES).
+      2. Absence of Kayak's own result-card anchor (data-resultid) AND
+         no price ($NNN) pattern anywhere in the page. A genuine results
+         page — even a near-empty one, even one that only matches via the
+         structural fallback below — always has at least one of these;
+         a pure challenge shell has neither.
+    """
+    lower = html.lower()
+    if any(sig in lower for sig in _BLOCK_PAGE_SIGNATURES):
+        return True
+    if "data-resultid" not in html and not _PRICE_RE.search(html):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -593,9 +671,16 @@ def main() -> None:
     api_key = get_api_key()
 
     total_requests = len(ROUTES) * WINTER_2026_DAYS
+    # Best case: every request succeeds on attempt 1 at premium_proxy (~25cr).
+    # Worst case: every request exhausts all retries and lands on the
+    # stealth_proxy escalation on the final attempt (~75cr, plus the
+    # premium_proxy attempts before it).
+    best_case = total_requests * 25
+    worst_case = total_requests * (25 * (MAX_RETRIES - 1) + 75)
     logger.info(
-        f"\n⚠  Credit estimate: {total_requests} requests × 75 credits "
-        f"= ~{total_requests * 75:,} ScrapingBee credits (all 4 routes run simultaneously).\n"
+        f"\n⚠  Credit estimate: {total_requests} requests, {best_case:,}–{worst_case:,} "
+        f"ScrapingBee credits depending on how often the stealth_proxy escalation "
+        f"kicks in (all {len(ROUTES)} routes run simultaneously).\n"
     )
 
     # Create one final CSV per route with the current date
