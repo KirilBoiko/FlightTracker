@@ -481,16 +481,16 @@ def parse_kayak_html(
     Parses the full rendered HTML from a Kayak results page and extracts
     flight records.
 
-    Result card detection strategy (class-name agnostic):
+    Result card detection strategy:
     -------------------------------------------------------
-    Kayak attaches  data-resultid="<uuid>"  to each flight result card —
-    this attribute is used by their own analytics code and has been stable
-    for years.  We use it as the primary anchor for card discovery.
+    Primary: Kayak currently renders each result card as a <div> with
+    class "nrc6-mod-pres-default".  This has been confirmed as the live
+    markup as of September 2026.
 
-    If data-resultid cards are absent (e.g., bot-blocked page, loading failure),
-    we fall back to finding <div> containers that contain BOTH a price pattern
-    AND a time pattern in their text — a structural heuristic that is resilient
-    to class-name rotation.
+    Fallback: If the primary selector finds nothing (markup change, bot-block,
+    failed render), we fall back to a structural heuristic — any <div> that
+    contains both a price AND a time pattern.  This is class-name agnostic
+    and resilient to future Kayak redesigns.
 
     Returns a list of record dicts (one per result card found).
     An empty list signals that the page yielded no usable data.
@@ -499,17 +499,21 @@ def parse_kayak_html(
     snap = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     records: list[dict] = []
 
-    # ── Strategy 1: data-resultid anchors ──────────────────────────────────
-    cards = soup.find_all(attrs={"data-resultid": True})
+    # ── Strategy 1: nrc6-mod-pres-default class (current Kayak markup) ─────
+    cards = soup.find_all("div", class_="nrc6-mod-pres-default")
 
-    if not cards:
-        logger.warning(
-            f"  [Parser] No [data-resultid] cards found for "
-            f"{origin}→{dest} {date_str}. Falling back to structural heuristic."
+    if cards:
+        logger.info(
+            f"  [Parser] Found {len(cards)} [nrc6-mod-pres-default] cards "
+            f"for {origin}→{dest} {date_str}."
         )
 
     # ── Strategy 2 (fallback): structural heuristic ────────────────────────
     if not cards:
+        logger.warning(
+            f"  [Parser] No [nrc6-mod-pres-default] cards found for "
+            f"{origin}→{dest} {date_str}. Falling back to structural heuristic."
+        )
         candidates = soup.find_all("div")
         for div in candidates:
             text = div.get_text()
