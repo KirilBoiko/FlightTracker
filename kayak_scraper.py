@@ -3,7 +3,7 @@
 kayak_scraper.py
 ================
 Scrapes daily cheapest flight prices from Kayak for TBS-TLV and TLV-TBS
-(24 Oct 2026 – 31 Mar 2027) via ScrapingBee API.
+(from tomorrow through 31 Mar 2027) via ScrapingBee API.
 
 Usage:
     export SCRAPINGBEE_API_KEY="your_key_here"
@@ -49,9 +49,9 @@ ROUTES: list[tuple[str, str]] = [
     ("TLV", "TBS"),
 ]
 
-WINTER_2026_START = datetime.date(2026, 10, 24)
+WINTER_2026_START = datetime.date.today() + datetime.timedelta(days=1)
 WINTER_2026_END   = datetime.date(2027, 3, 31)
-WINTER_2026_DAYS  = (WINTER_2026_END - WINTER_2026_START).days + 1
+WINTER_2026_DAYS  = max(0, (WINTER_2026_END - WINTER_2026_START).days + 1)
 
 RAW_HTML_DIR  = Path("api_responses") / "kayak_raw"
 
