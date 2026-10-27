@@ -49,7 +49,7 @@ ROUTES: list[tuple[str, str]] = [
     ("TLV", "TBS"),
 ]
 
-WINTER_2026_START = datetime.date.today() + datetime.timedelta(days=1)
+WINTER_2026_START = datetime.date.today()
 WINTER_2026_END   = datetime.date(2027, 3, 31)
 WINTER_2026_DAYS  = max(0, (WINTER_2026_END - WINTER_2026_START).days + 1)
 
