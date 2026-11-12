@@ -2,12 +2,16 @@
 """
 kayak_scraper.py
 ================
-Scrapes daily cheapest flight prices from Kayak for TBS-TLV and TLV-TBS
-(from tomorrow through 31 Mar 2027) via ScrapingBee API.
+Scrapes cheapest flight prices from Kayak via ScrapingBee API for the
+planned flight schedule (TBS/TLV/BUS). Flights <= 90 days out are scraped daily;
+flights > 90 days out are scraped every 3 days.
 
 Usage:
     export SCRAPINGBEE_API_KEY="your_key_here"
-    python3 kayak_scraper.py
+    python3 kayak_scraper.py                # daily cadence run
+    python3 kayak_scraper.py --initial      # initial full pass over the entire schedule
+    python3 kayak_scraper.py --dry-run      # preview search count without making requests
+    python3 kayak_scraper.py --export-schedule  # export proposed_schedule.csv for Tableau Prep
 """
 
 from __future__ import annotations
@@ -25,8 +29,14 @@ import pandas as pd
 from pathlib import Path
 from bs4 import BeautifulSoup, Tag
 from typing import Iterator, Optional
+from dataclasses import dataclass
+from zoneinfo import ZoneInfo
+import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import argparse
+import collections
+
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -44,21 +54,14 @@ logger = logging.getLogger(__name__)
 
 SCRAPINGBEE_ENDPOINT = "https://app.scrapingbee.com/api/v1/"
 
-ROUTES: list[tuple[str, str]] = [
-    ("TBS", "TLV"),
-    ("TLV", "TBS"),
-]
-
-WINTER_2026_START = datetime.date.today()
-WINTER_2026_END   = datetime.date(2027, 3, 31)
-WINTER_2026_DAYS  = max(0, (WINTER_2026_END - WINTER_2026_START).days + 1)
+MAX_WORKERS = int(os.environ.get("KAYAK_MAX_WORKERS", "4"))  # concurrent ScrapingBee sessions
 
 RAW_HTML_DIR  = Path("api_responses") / "kayak_raw"
 
 JS_WAIT_MS = 15000  # ms to wait after page load before capturing HTML
 DELAY_MIN = 10
 DELAY_MAX = 25
-MAX_RETRIES = 3
+MAX_RETRIES = 3  # Attempts 1 & 2: premium proxy (handles 500s / timeouts); Attempt 3: stealth proxy
 RETRY_BACKOFF = 20
 REQUEST_TIMEOUT = 150
 
@@ -401,24 +404,24 @@ def append_checkpoint(records: list[dict], filepath: str, is_first_write: bool) 
 def scrape_route(
     origin: str,
     dest: str,
+    dates: list[datetime.date],
     api_key: str,
     temp_csv: Path,
 ) -> tuple[int, int]:
-    """Scrapes all dates for a single route and writes records to CSV."""
+    """Scrapes the given dates for a single route and writes records to CSV."""
     route_label = f"{origin}→{dest}"
     success_count = 0
     failure_count = 0
     is_first_write = True
-    total = WINTER_2026_DAYS
+    total = len(dates)
 
-    for offset in range(total):
-        dep_date = WINTER_2026_START + datetime.timedelta(days=offset)
+    for offset, dep_date in enumerate(dates):
         date_str = dep_date.isoformat()
         url = (
             f"https://www.kayak.com/flights/{origin}-{dest}/{date_str}"
             f"?sort=price_a&stops=~0"
         )
-        label = f"{route_label} {date_str} (day {offset+1}/{total})"
+        label = f"{route_label} {date_str} (search {offset+1}/{total})"
         logger.info(f"[{route_label}] Processing: {label}")
 
         html = fetch_via_scrapingbee(url, api_key, label)
@@ -447,26 +450,332 @@ def scrape_route(
     return success_count, failure_count
 
 
+CADENCE_TIERS: list[tuple[Optional[int], int]] = [
+    (90, 1),
+    (None, 3),
+]
+MAX_DAYS_AHEAD = 330
+LEGACY_DAILY_UNTIL = datetime.date(2027, 3, 31)
+LEGACY_ROUTES: list[tuple[str, str]] = [("TBS", "TLV"), ("TLV", "TBS")]
+
+AIRPORT_TZ = {
+    "TBS": ZoneInfo("Asia/Tbilisi"),
+    "BUS": ZoneInfo("Asia/Tbilisi"),
+    "TLV": ZoneInfo("Asia/Jerusalem"),
+}
+UTC = datetime.timezone.utc
+
+
+@dataclass(frozen=True)
+class Leg:
+    day: int                 # 1=Mon .. 7=Sun (UTC)
+    origin: str
+    dest: str
+    dep_utc: Optional[str]   # "HH:MM" or None (TBD)
+
+
+@dataclass(frozen=True)
+class Period:
+    start: datetime.date
+    end: datetime.date
+    legs: tuple[Leg, ...]
+
+
+def _legs(rows: str) -> tuple[Leg, ...]:
+    """Parses lines of 'day origin dest time' (time may be TBD)."""
+    out = []
+    for line in rows.strip().splitlines():
+        day, o, d, t = line.split()
+        out.append(Leg(int(day), o, d, None if t == "TBD" else t))
+    return tuple(out)
+
+
+D = datetime.date
+
+# ---- 01.12.2026 - 26.03.2027 (times TBD) ----------------------------------
+_WINTER = _legs("""
+4 TBS TLV TBD
+4 TLV TBS TBD
+7 TBS TLV TBD
+7 TLV TBS TBD
+""")
+
+# ---- 28.03.2027 - 30.05.2027 ----------------------------------------------
+_SPRING = _legs("""
+1 TBS TLV 22:00
+1 TLV TBS 02:00
+2 TLV TBS 02:00
+4 TBS BUS 07:00
+4 BUS TLV 09:00
+4 TLV BUS 12:30
+4 BUS TBS 16:00
+4 TBS TLV 22:00
+5 TLV TBS 02:00
+6 TBS TLV 22:00
+7 TLV BUS 02:00
+7 BUS TLV 07:30
+7 TLV TBS 11:00
+7 TBS TLV 22:00
+""")
+
+# ---- 01.06.2027 - 28.06.2027 ----------------------------------------------
+_JUNE = _legs("""
+1 TLV TBS 01:30
+1 TBS TLV 22:00
+2 TLV BUS 01:30
+2 BUS TLV 07:00
+2 TLV TBS 10:30
+3 TBS TLV 22:00
+4 TLV BUS 01:30
+4 BUS TLV 07:00
+4 TLV TBS 10:30
+4 TBS TLV 22:00
+5 TLV TBS 01:30
+6 TBS TLV 22:00
+7 TLV BUS 01:30
+7 BUS TLV 07:00
+7 TLV TBS 10:30
+7 TBS TLV 22:00
+""")
+
+# ---- 29.06.2027 - 31.08.2027 ----------------------------------------------
+_SUMMER = _legs("""
+1 TLV BUS 01:30
+1 BUS TLV 07:00
+1 TLV TBS 10:30
+1 TBS TLV 22:00
+2 TLV BUS 01:30
+2 BUS TLV 07:00
+2 TLV TBS 10:30
+2 TBS TLV 22:00
+3 TLV BUS 01:30
+3 BUS TLV 07:00
+3 TLV TBS 10:30
+3 TBS TLV 22:00
+4 TLV BUS 01:30
+4 BUS TLV 07:00
+4 TLV TBS 10:30
+4 TBS TLV 22:00
+5 TLV BUS 01:30
+5 BUS TLV 07:00
+5 TLV TBS 10:30
+6 TBS TLV 22:00
+7 TLV BUS 01:30
+7 BUS TLV 07:00
+7 TLV TBS 10:30
+7 TBS TLV 22:00
+""")
+
+# ---- 01.09.2027 - 30.09.2027 ----------------------------------------------
+_SEPTEMBER = _legs("""
+1 TLV TBS 01:30
+1 TBS TLV 22:00
+2 TLV BUS 01:30
+2 BUS TLV 07:00
+2 TLV TBS 10:30
+3 TBS TLV 22:00
+4 TLV BUS 01:30
+4 BUS TLV 07:00
+4 TLV TBS 10:30
+4 TBS TLV 22:00
+5 TLV TBS 01:30
+6 TBS TLV 22:00
+7 TLV BUS 01:30
+7 BUS TLV 07:00
+7 TLV TBS 09:30
+7 TBS TLV 22:00
+""")
+
+# ---- 01.10.2027 - 30.10.2027 ----------------------------------------------
+_OCTOBER = _legs("""
+1 TBS TLV 22:00
+2 TLV BUS 01:30
+2 BUS TLV 07:00
+2 TLV TBS 10:30
+3 TBS TLV 22:00
+4 TLV BUS 01:30
+4 BUS TLV 07:00
+4 TLV TBS 10:30
+4 TBS TLV 22:00
+5 TLV TBS 01:30
+6 TBS TLV 22:00
+7 TLV BUS 01:30
+7 BUS TLV 07:00
+7 TLV TBS 10:30
+""")
+
+SCHEDULE: list[Period] = [
+    Period(D(2026, 12, 1), D(2027, 3, 26), _WINTER),
+    Period(D(2027, 3, 28), D(2027, 5, 30), _SPRING),
+    Period(D(2027, 6, 1),  D(2027, 6, 28), _JUNE),
+    Period(D(2027, 6, 29), D(2027, 8, 31), _SUMMER),
+    Period(D(2027, 9, 1),  D(2027, 9, 30), _SEPTEMBER),
+    Period(D(2027, 10, 1), D(2027, 10, 30), _OCTOBER),
+]
+
+
+# ---------------------------------------------------------------------------
+# Logic
+# ---------------------------------------------------------------------------
+def local_departure_date(utc_date: datetime.date, leg: Leg) -> datetime.date:
+    """Local calendar date at the origin airport for a leg departing on utc_date."""
+    if leg.dep_utc is None:
+        return utc_date  # time unknown: assume local date == scheduled date
+    hh, mm = map(int, leg.dep_utc.split(":"))
+    dt_utc = datetime.datetime(utc_date.year, utc_date.month, utc_date.day, hh, mm, tzinfo=UTC)
+    return dt_utc.astimezone(AIRPORT_TZ[leg.origin]).date()
+
+
+def scheduled_searches(
+    today: datetime.date,
+    max_days_ahead: int = MAX_DAYS_AHEAD,
+) -> dict[tuple[str, str, datetime.date], list[str]]:
+    """
+    All distinct (origin, dest, local_date) Kayak searches covering the schedule from
+    ``today`` through ``today + max_days_ahead``. Value = UTC departure times covered
+    (informational, for logging).
+    """
+    horizon = today + datetime.timedelta(days=max_days_ahead)
+    searches: dict[tuple[str, str, datetime.date], list[str]] = {}
+
+    def add(o: str, d: str, local_date: datetime.date, t: str) -> None:
+        if today <= local_date <= horizon:
+            searches.setdefault((o, d, local_date), []).append(t)
+
+    # Legacy: current flights, every day, until the planned schedule takes over.
+    day = today
+    while day <= min(LEGACY_DAILY_UNTIL, horizon):
+        for o, d in LEGACY_ROUTES:
+            add(o, d, day, "legacy")
+        day += datetime.timedelta(days=1)
+
+    # Planned schedule.
+    for period in SCHEDULE:
+        by_day: dict[int, list[Leg]] = {}
+        for leg in period.legs:
+            by_day.setdefault(leg.day, []).append(leg)
+        utc_day = period.start
+        while utc_day <= period.end:
+            for leg in by_day.get(utc_day.isoweekday(), []):
+                add(leg.origin, leg.dest, local_departure_date(utc_day, leg),
+                    leg.dep_utc or "TBD")
+            utc_day += datetime.timedelta(days=1)
+    return searches
+
+
+def cadence_step(days_ahead: int) -> int:
+    for max_ahead, step in CADENCE_TIERS:
+        if max_ahead is None or days_ahead <= max_ahead:
+            return step
+    return 1
+
+
+def due_today(
+    searches: dict[tuple[str, str, datetime.date], list[str]],
+    today: datetime.date,
+    initial: bool = False,
+) -> list[tuple[str, str, datetime.date]]:
+    """
+    Searches to run on ``today``.
+    - If initial=True: full pass over the entire schedule.
+    - Rolling 90 days: departing <= 90 days from today -> scraped every day.
+    - Beyond 90 days: departing > 90 days from today  -> scraped when days_ahead % 3 == 0.
+    """
+    due = []
+    for (o, d, date) in sorted(searches):
+        days_ahead = (date - today).days
+        step = cadence_step(days_ahead)
+        if initial or days_ahead % step == 0:
+            due.append((o, d, date))
+    return due
+
+
+# ---------------------------------------------------------------------------
+# Export for Tableau Prep (union into Booking_Report_Clean)
+# ---------------------------------------------------------------------------
+def time_slot_utc(hhmm: str) -> str:
+    """6-hour UTC slot label used by the price flow: 00-06, 06-12, 12-18, 18-24."""
+    h = int(hhmm.split(":")[0]) // 6 * 6
+    return f"{h:02d}-{h + 6:02d}"
+
+
+def proposed_flights(start: datetime.date) -> list[dict]:
+    """One row per proposed flight (UTC date) from ``start`` on. TBD-time legs are skipped."""
+    rows = []
+    for period in SCHEDULE:
+        by_day: dict[int, list[Leg]] = {}
+        for leg in period.legs:
+            if leg.dep_utc:
+                by_day.setdefault(leg.day, []).append(leg)
+        day = max(period.start, start)
+        while day <= period.end:
+            for leg in by_day.get(day.isoweekday(), []):
+                rows.append({
+                    "departure_date": day.isoformat(),
+                    "departure_time(UTC)": leg.dep_utc,
+                    "time_slot_utc": time_slot_utc(leg.dep_utc),
+                    "Origin": leg.origin,
+                    "Destination": leg.dest,
+                    "Route": f"{leg.origin}-{leg.dest}",
+                    "Flight Status": "Proposed",
+                })
+            day += datetime.timedelta(days=1)
+    return rows
+
+
+def build_plan(initial: bool) -> dict[tuple[str, str], list[datetime.date]]:
+    """Returns {(origin, dest): [dates to search today]} per the schedule and cadence."""
+    today = datetime.date.today()
+    searches = scheduled_searches(today)
+    due = due_today(searches, today, initial=initial)
+    plan: dict[tuple[str, str], list[datetime.date]] = collections.defaultdict(list)
+    for o, d, date in due:
+        plan[(o, d)].append(date)
+    return dict(sorted(plan.items()))
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Kayak flight pricing scraper")
+    parser.add_argument("--initial", action="store_true",
+                        help="One full pass over every scheduled search, ignoring cadence tiers")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the plan and credit estimate without making any requests")
+    parser.add_argument("--export-schedule", metavar="START_DATE", nargs="?", const="2027-03-26",
+                        help="Export proposed schedule CSV for Tableau Prep and exit (default start: 2027-03-26)")
+    args = parser.parse_args()
+
+    if args.export_schedule:
+        out_file = "proposed_schedule.csv"
+        data = proposed_flights(datetime.date.fromisoformat(args.export_schedule))
+        with open(out_file, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(data[0]))
+            w.writeheader()
+            w.writerows(data)
+        logger.info(f"Exported {len(data)} proposed flights ({data[0]['departure_date']} → {data[-1]['departure_date']}) to {out_file}")
+        return
+
+    plan = build_plan(args.initial)
+    ROUTES = list(plan)
+    total_requests = sum(len(v) for v in plan.values())
+    best_case = total_requests * 25
+    worst_case = total_requests * (25 * (MAX_RETRIES - 1) + 75)
+
     logger.info("=" * 70)
-    logger.info("Kayak Flight Scraper — Winter 2026/27 (Oct-Mar) (via ScrapingBee)")
-    logger.info(f"  Routes  : {' | '.join(f'{o}→{d}' for o, d in ROUTES)}")
-    logger.info(f"  Period  : {WINTER_2026_START} → {WINTER_2026_END}  ({WINTER_2026_DAYS} days)")
-    logger.info(f"  Workers : {len(ROUTES)} concurrent sessions (one per route)")
-    logger.info(f"  Output  : Multiple route-specific CSV files")
+    logger.info(f"Kayak Flight Scraper (via ScrapingBee)  "
+                f"[{'INITIAL FULL PASS' if args.initial else 'daily cadence run'}]")
+    for (o, d), dates in plan.items():
+        span = f"{dates[0]} → {dates[-1]}" if dates else "-"
+        logger.info(f"  {o}→{d}: {len(dates):4d} searches ({span})")
+    logger.info(f"  Total   : {total_requests} searches, "
+                f"{best_case:,}–{worst_case:,} ScrapingBee credits")
+    logger.info(f"  Workers : {min(MAX_WORKERS, max(1, len(ROUTES)))} concurrent sessions")
     logger.info(f"  Log     : {log_filename}")
     logger.info("=" * 70)
 
-    api_key = get_api_key()
+    if args.dry_run or not ROUTES:
+        return
 
-    total_requests = len(ROUTES) * WINTER_2026_DAYS
-    best_case = total_requests * 25
-    worst_case = total_requests * (25 * (MAX_RETRIES - 1) + 75)
-    logger.info(
-        f"\n⚠  Credit estimate: {total_requests} requests, {best_case:,}–{worst_case:,} "
-        f"ScrapingBee credits depending on how often the stealth_proxy escalation "
-        f"kicks in (all {len(ROUTES)} routes run simultaneously).\n"
-    )
+    api_key = get_api_key()
 
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     final_csvs: dict[tuple[str, str], Path] = {
@@ -477,13 +786,14 @@ def main() -> None:
             p.unlink()
             logger.info(f"Removed existing '{p}' — creating fresh file.")
 
-    logger.info(f"Launching {len(ROUTES)} concurrent scraping sessions...\n")
+    workers = min(MAX_WORKERS, len(ROUTES))
+    logger.info(f"Launching {workers} concurrent scraping sessions...\n")
     total_success = 0
     total_failure = 0
 
-    with ThreadPoolExecutor(max_workers=len(ROUTES)) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(scrape_route, o, d, api_key, final_csvs[(o, d)]): (o, d)
+            executor.submit(scrape_route, o, d, plan[(o, d)], api_key, final_csvs[(o, d)]): (o, d)
             for o, d in ROUTES
         }
         for future in as_completed(futures):
@@ -553,7 +863,7 @@ def main() -> None:
     logger.info("=" * 70)
     logger.info("Run Summary")
     logger.info("-" * 70)
-    logger.info(f"  Concurrent sessions      : {len(ROUTES)}")
+    logger.info(f"  Concurrent sessions      : {workers}")
     logger.info(f"  Successful pages parsed  : {total_success}")
     logger.info(f"  Failed / empty pages     : {total_failure}")
     logger.info(f"  Total flight records     : {total_records_saved}")
